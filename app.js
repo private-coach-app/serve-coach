@@ -1,5 +1,6 @@
 import * as E from './engine.js';
 import { L, lang, setLang, WD } from './i18n.js';
+import { PHASES, phaseAngles, overlayTrophy, animateIdeal } from './ideal.js';
 import { ITEMS, PRIORITY, LABEL, DRILLS, WARMUP, judgeAll, pickTask, makeSchedule, compare, CMP, wd } from './rules.js';
 
 const $ = s => document.querySelector(s);
@@ -79,7 +80,7 @@ const taskMsg = s => s.task === 'keep' ? L('大きな問題は見当たりませ
 
 // ---------- home ----------
 async function home() {
-  const ss = await S.sessions(); const last = ss[ss.length - 1];
+  const ss = await S.sessions(); if (curRoute !== 'home') return; const last = ss[ss.length - 1];
   if (!last) {
     app.innerHTML = `<h1>${L('最初のサーブを分析しましょう', '첫 서브를 분석해 볼까요?')}</h1>
     <div class="card hero"><div class="k">${L('はじめに', '시작하기')}</div><div class="t">${L('横から撮ったサーブ動画1本', '옆에서 찍은 서브 영상 1개')}</div><div style="font-size:14px;opacity:.85">${L('サーブが3〜5本入った20〜60秒の動画がベストです。', '서브 3~5개가 들어간 20~60초 영상이 가장 좋아요.')}</div></div>
@@ -91,6 +92,7 @@ async function home() {
   const days = last.schedule; const idx = days.findIndex(d => d.date === today);
   const dleft = Math.max(0, Math.round((new Date(days[6].date) - new Date(today)) / 864e5));
   const done = (await S.get('done_' + last.id)) || {};
+  if (curRoute !== 'home') return;
   const d = idx >= 0 ? days[idx] : null;
   const due = dleft === 0 || idx < 0;
   app.innerHTML = `<p class="sub">${esc(last.date)} ${L('の分析', '분석 기준')}</p><h1>${last.task === 'keep' ? taskTitle('keep') : L('今週の課題：', '이번 주 과제: ') + taskTitle(last.task)}</h1>
@@ -177,13 +179,14 @@ async function analyse(vEl) {
 function failBox(t) { $('#pick').disabled = false; $('#pt').textContent = L('分析できませんでした', '분석하지 못했어요'); alertBox(t); }
 
 // ---------- mark (serve confirmation) ----------
-async function frameAt(i, w, crop = true, hl) { await E.seek(work.video, Math.min(work.video.duration - 0.001, (i + 0.5) / FPS)); await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); return E.drawFrame(document.createElement('canvas'), work.video, work.tr.frames[i], { crop, w, h: w * 16 / 9, highlight: hl }); }
+async function frameAt(i, w, crop = true, hl, after) { await E.seek(work.video, Math.min(work.video.duration - 0.001, (i + 0.5) / FPS)); await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); return E.drawFrame(document.createElement('canvas'), work.video, work.tr.frames[i], { crop, w, h: w * 16 / 9, highlight: hl, after }); }
 async function mark() {
   if (!work) return go('capture');
   app.innerHTML = `<h1>${L(`サーブを${work.serves.length}本見つけました`, `서브 ${work.serves.length}개를 찾았어요`)}</h1><p class="sub">${L('トロフィーの姿勢(膝が一番曲がった瞬間)です。間違って拾われたものはタップして外してください。', '트로피 자세(무릎이 가장 굽은 순간)입니다. 잘못 잡힌 건 눌러서 빼 주세요.')}</p>
   <div class="serves" id="sv"></div><div id="adjw" class="card hide"><b id="adjt"></b><canvas id="big"></canvas>
   <div class="adj"><button class="btn ghost" id="m1">−1</button><span id="fi" class="msg"></span><button class="btn ghost" id="p1">+1</button></div><div class="msg">${L('コマを動かしてトロフィーの瞬間に合わせられます。', '프레임을 움직여 트로피 순간에 맞출 수 있어요.')}</div></div>
   <button class="btn ball" id="ok">${L('このサーブでレポートを見る', '이 서브들로 리포트 보기')}</button><p class="sub" style="margin-top:8px">${L('分析', '분석')} ${work.secs}${L('秒', '초')} · ${L('人物検出', '사람 인식')} ${(work.tr.detectRate * 100).toFixed(0)}%</p>`;
+  $('#ok').onclick = async () => { if (!work.sel.some(Boolean)) return alertBox(L('サーブを1本以上残してください。', '서브를 하나 이상 남겨 주세요.')); const b = $('#ok'); if (b.disabled) return; b.disabled = true; b.textContent = L('レポートを作成中…', '리포트 만드는 중…'); try { await buildSession(); } catch (e) { b.disabled = false; alertBox(e.message); } };
   const sv = $('#sv'); let cur = 0;
   for (let i = 0; i < work.serves.length; i++) {
     const c = await frameAt(work.serves[i].tro, 240);
@@ -200,7 +203,6 @@ async function mark() {
   const mv = async d => { const s = work.serves[cur]; const n = Math.max(0, Math.min(work.tr.n - 1, s.tro + d)); work.serves[cur] = E.remeasure(work.tr, work.ctx, s, n); await showBig(); const c = await frameAt(n, 240); sv.children[cur].querySelector('canvas').replaceWith(c); };
   $('#m1').onclick = () => mv(-1); $('#p1').onclick = () => mv(1);
   sv.firstChild && sv.firstChild.classList.add('on'); await showBig();
-  $('#ok').onclick = async () => { if (!work.sel.some(Boolean)) return alertBox(L('サーブを1本以上残してください。', '서브를 하나 이상 남겨 주세요.')); await buildSession(); };
 }
 const med = a => { const s = a.filter(Number.isFinite).sort((x, y) => x - y); return s.length ? (s.length % 2 ? s[s.length >> 1] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2) : NaN; };
 
@@ -213,8 +215,13 @@ async function buildSession() {
   const repeat = prev && prev.task === task && task !== 'keep' ? (prev.repeat || 0) + 1 : 0;
   const rep = used.reduce((a, b) => Math.abs(b.knee - metrics.knee) < Math.abs(a.knee - metrics.knee) ? b : a, used[0]);
   const hl = task !== 'keep' ? ITEMS[task].joints : [];
-  const img = (await frameAt(rep.tro, 540, true, hl)).toDataURL('image/jpeg', 0.82);
-  const s = { id: Date.now(), date: new Date().toISOString().slice(0, 10), level: profile.level, n: used.length, metrics, judge: j, task, repeat, img, prevId: prev ? prev.id : null, schedule: makeSchedule(task, profile.court) };
+  const view = work.ctx.view;
+  const after = view === 'side' ? (c, T, k) => { const p = work.tr.frames[rep.tro]; if (!p) return; const hip = T({ x: (p[23].x + p[24].x) / 2, y: (p[23].y + p[24].y) / 2 }); overlayTrophy(c, hip, work.ctx.bodyH * k, rep.dir); } : null;
+  const img = (await frameAt(rep.tro, 540, true, hl, after)).toDataURL('image/jpeg', 0.82);
+  const pf = E.phaseFrames(work.tr, rep);
+  const phases = [];
+  for (const f of pf) phases.push({ img: (await frameAt(f, 240, true)).toDataURL('image/jpeg', 0.7), ...E.anglesAt(work.tr, work.ctx, f) });
+  const s = { id: Date.now(), date: new Date().toISOString().slice(0, 10), level: profile.level, n: used.length, metrics, judge: j, task, repeat, img, view, phases, prevId: prev ? prev.id : null, schedule: makeSchedule(task, profile.court) };
   await S.add(s);
   go('view', s.id);
 }
@@ -224,14 +231,17 @@ async function view(id) {
   const ss = await S.sessions(); const s = ss.find(x => x.id === id); if (!s) return go('home');
   const prev = ss.find(x => x.id === s.prevId);
   const LB = LABEL();
-  const goods = PRIORITY.filter(k => s.judge[k] === 'good'), warns = PRIORITY.filter(k => s.judge[k] === 'warn' || s.judge[k] === 'mid');
+  const goods = PRIORITY.filter(k => s.judge[k] === 'good'), warns = [...PRIORITY.filter(k => s.judge[k] === 'warn'), ...PRIORITY.filter(k => s.judge[k] === 'mid')];
   const done = (await S.get('done_' + s.id)) || {};
+  if (curRoute !== 'view') return;
   const row = k => { const it = ITEMS[k], v = s.metrics[k], jj = s.judge[k];
     const msg = jj === 'good' ? it.good() : jj === 'na' ? (k === 'elbow' ? L('横からの撮影ではラケット腕が体に隠れて測りにくいです。', '옆 촬영에서는 라켓 팔이 몸에 가려 재기 어려워요.') : L('この動画では測れませんでした。', '이 영상에서는 잴 수 없었어요.')) : it.warn(v);
-    return `<div class="item"><div><div class="n">${it.name()} <span class="msg">${it.grade === 'B' ? L('(参考)', '(참고)') : ''}</span></div><div class="msg">${esc(msg)}</div></div>
+    return `<div class="item"><div><div class="n">${it.name()} <span class="msg">${it.grade === 'B' ? L('(参考)', '(참고)') : ''}</span></div><div class="msg">${esc(msg)}</div><div class="range">${esc(it.ideal(s.level))}</div></div>
     <div class="v">${isFinite(v) ? it.fmt(v) : '—'}<br><span class="tag ${jj}">${LB[jj]}</span></div></div>`; };
   app.innerHTML = `<p class="sub">${s.date} · ${L(`サーブ${s.n}本の中央値`, `서브 ${s.n}개 중앙값`)} · ${s.level === 'mid' ? L('中級', '중급') : L('初級', '입문')}</p><h1>${L('分析レポート', '분석 리포트')}</h1>
-  <img class="frame" src="${s.img}" alt=""><p class="sub" style="margin-top:6px">${s.task !== 'keep' ? L('オレンジの線 = 今週の課題の部位', '주황 선 = 이번 주 과제 부위') : L('緑の線 = 検出した姿勢', '초록 선 = 인식된 자세')}</p>
+  <img class="frame" src="${s.img}" alt=""><p class="sub" style="margin-top:6px">${L('緑 = あなたの姿勢', '초록 = 내 자세')}${s.task !== 'keep' ? L(' · オレンジ = 今週の課題の部位', ' · 주황 = 이번 주 과제 부위') : ''}${s.view === 'side' ? L(' · 青の点線 = 理想のトロフィー姿勢(腰の位置と体格に合わせて表示)', ' · 파란 점선 = 이상적인 트로피 자세(허리 위치·체격에 맞춤)') : ''}</p>
+  ${s.view && s.view !== 'side' ? `<div class="warnbox">${L('この動画は正面または斜めから撮影されたようです。判定は横からの撮影を前提にしているため、今回の数値は参考程度にしてください。理想ライン(青)も表示していません。', '이 영상은 정면이나 비스듬한 각도에서 찍힌 것 같아요. 판정은 옆 촬영을 기준으로 하므로 이번 수치는 참고만 해 주세요. 이상적인 선(파랑)도 표시하지 않았어요.')}</div>` : ''}
+  ${priorityHtml(s)}
   ${prev ? cmpHtml(s, prev) : ''}
   <h2>${L('良い点', '좋은 점')}</h2><div class="card">${goods.length ? goods.map(k => `<div class="item"><div><span class="tag good">${LB.good}</span> <b>${ITEMS[k].name()}</b><div class="msg">${ITEMS[k].good()}</div></div></div>`).join('') : `<div class="msg">${L('まだ基準を超えた項目はありません。課題を1つずつ直していきましょう。', '아직 기준을 넘은 항목이 없어요. 과제 하나씩 바꿔 가면 됩니다.')}</div>`}</div>
   <h2>${L('今週の課題', '이번 주 과제')}</h2>
@@ -240,13 +250,45 @@ async function view(id) {
   ${s.repeat >= 2 ? `<div style="font-size:13px;opacity:.9">${L('3週連続で同じ課題です。一度コーチに動画を見てもらうのがおすすめです。', '3주째 같은 과제예요. 코치에게 영상을 한 번 보여 주는 걸 권해요.')}</div>` : ''}</div>
   ${warns.length > 1 ? `<div class="msg">${L('次の候補：', '다음 후보: ')}${warns.filter(k => k !== s.task).map(k => ITEMS[k].name()).join(' → ')} ${L('(1つずつ)', '(한 번에 하나씩)')}</div>` : ''}
   <h2>${L('項目別の結果', '항목별 결과')}</h2><div class="card">${PRIORITY.map(row).join('')}</div>
+  ${flowHtml(s)}
   <h2>${L('7日間スケジュール', '7일 스케줄')}</h2><div class="card">${s.schedule.map((d, i) => dayHtml(s.task, d, i, done, false)).join('')}</div>
   <h2>${L('シェアカード', '공유 카드')}</h2><div id="share"><button class="btn ghost" id="mk">${L('画像カードを作る', '이미지 카드 만들기')}</button></div>
+  <div class="note">${L('数値の出どころ：膝の理想値と理想モデルのトロフィー・インパクトの角度は、テニスサーブの研究をまとめた論文(Jacquier-Bret & Gorce 2024、上級者中心)の平均値です。そのほかは一般的なコーチング基準をもとにした目安値で、コーチの確認後に確定します。', '수치 출처: 무릎 이상값과 이상 모델의 트로피·임팩트 각도는 테니스 서브 연구를 종합한 논문(Jacquier-Bret & Gorce 2024, 상급자 중심)의 평균값이에요. 나머지는 일반적인 코칭 기준을 바탕으로 한 잠정값이고, 코치 확인 후 확정해요.')}</div>
   <div class="note">${L('ベータv0：判定基準はコーチ確認前のドラフトです。痛みがあれば課題を中止してください。総合点は信頼性の検証前のため表示していません。', '베타 v0: 판정 기준은 코치 검수 전 초안입니다. 통증이 있으면 과제를 멈추세요. 총점은 신뢰도 검증 전이라 표시하지 않습니다.')}</div>
   <button class="btn ghost" id="hm">${L('ホームへ', '홈으로')}</button>`;
   bindChecks(s.id, done);
+  startFlow(s);
   $('#hm').onclick = () => go('home');
   $('#mk').onclick = async () => { const url = await shareCard(s, prev); $('#share').innerHTML = `<img class="frame" src="${url}" style="max-width:300px;margin:0 auto"><p class="sub" style="text-align:center;margin-top:6px">${L('画像を長押しして保存してください', '이미지를 길게 눌러 저장하세요')}</p>`; };
+}
+function priorityHtml(s) {
+  const LB = LABEL();
+  const list = [...PRIORITY.filter(k => s.judge[k] === 'warn'), ...PRIORITY.filter(k => s.judge[k] === 'mid')];
+  if (!list.length) return '';
+  return `<h2>${L('改善の優先順位', '개선 우선순위')}</h2><div class="card"><ol class="prio">${list.map((k, i) => `<li><div><b>${ITEMS[k].name()}</b> <span class="tag ${s.judge[k]}">${LB[s.judge[k]]}</span>${k === s.task ? ` <span class="tag now">${L('今週の課題', '이번 주 과제')}</span>` : ''}</div><div class="msg">${esc(ITEMS[k].warn(s.metrics[k]))}</div></li>`).join('')}</ol>
+  <div class="msg">${L('サーブは前の動作が崩れると後ろも崩れるため、トス→腕→脚の順に1つずつ直します。', '서브는 앞 동작이 흔들리면 뒤도 흔들려서, 토스 → 팔 → 다리 순서로 하나씩 고쳐요.')}</div></div>`;
+}
+let stopFlow = null, flipTimer = null;
+function flowHtml(s) {
+  const fmt = v => isFinite(v) ? Math.round(v) + '°' : '—';
+  const rows = PHASES.map((ph, i) => { const a = phaseAngles(ph), u = (s.phases || [])[i] || {};
+    return `<tr data-i="${i}"><td>${ph.name()}</td><td>${a.toss}°<br><span class="you">${fmt(u.toss)}</span></td><td>${a.elbow}°<br><span class="you">${fmt(u.elbow)}</span></td><td>${a.knee}°<br><span class="you">${fmt(u.knee)}</span></td></tr>`; }).join('');
+  return `<h2>${L('理想のサーブの流れ', '이상적인 서브 흐름')}</h2><div class="card">
+  <div class="flow"><div><canvas id="idealC" width="360" height="480"></canvas><div class="msg c">${L('理想(モデル)', '이상(모델)')}</div></div>
+  ${s.phases ? `<div><img id="youC" class="frame" src="${s.phases[0].img}"><div class="msg c">${L('あなた(同じ局面)', '나(같은 단계)')}</div></div>` : ''}</div>
+  <div class="phase" id="phName"></div>
+  <table class="ang"><tr><th>${L('局面', '단계')}</th><th>${L('トス腕', '토스 팔')}</th><th>${L('ラケット腕の肘', '라켓 팔 팔꿈치')}</th><th>${L('前膝', '앞 무릎')}</th></tr>${rows}</table>
+  <div class="msg">${L('上段 = 理想、下段(緑) = あなた。トス腕は真下0°〜真上180°。横から撮影した場合のみ比較できます。', '윗줄 = 이상, 아랫줄(초록) = 나. 토스 팔은 아래 0°~위 180°. 옆에서 찍은 영상만 비교할 수 있어요.')}</div></div>`;
+}
+function startFlow(s) {
+  if (stopFlow) stopFlow(); clearInterval(flipTimer);
+  const cv = $('#idealC'); if (!cv) return;
+  stopFlow = animateIdeal(cv, i => {
+    if (!$('#idealC')) { stopFlow(); return; }
+    $('#phName').textContent = `${i + 1}/6 ${PHASES[i].name()}`;
+    document.querySelectorAll('table.ang tr[data-i]').forEach(r => r.classList.toggle('on', +r.dataset.i === i));
+    const y = $('#youC'); if (y && s.phases && s.phases[i]) y.src = s.phases[i].img;
+  });
 }
 function cmpHtml(s, prev) {
   const C = CMP();
@@ -280,6 +322,7 @@ async function shareCard(s, prev) {
 // ---------- history ----------
 async function history() {
   const ss = (await S.sessions()).slice().reverse();
+  if (curRoute !== 'history') return;
   app.innerHTML = `<h1>${L('記録', '기록')}</h1>${ss.length ? ss.map(s => `<div class="card" data-id="${s.id}" style="display:flex;gap:12px;align-items:center;cursor:pointer">
   <img src="${s.img}" style="width:64px;border-radius:8px"><div><b>${s.date}</b><div class="msg">${L('課題：', '과제: ')}${taskTitle(s.task)} · ${L(`サーブ${s.n}本`, `서브 ${s.n}개`)}</div>
   <div class="msg">${L('膝', '무릎')} ${isFinite(s.metrics.knee) ? s.metrics.knee.toFixed(0) + '°' : '—'} · ${ITEMS.hold.name()} ${isFinite(s.metrics.hold) ? ITEMS.hold.fmt(s.metrics.hold) : '—'}</div></div></div>`).join('') : `<p class="sub">${L('まだ記録がありません。', '아직 기록이 없어요.')}</p>`}
@@ -289,6 +332,8 @@ async function history() {
 }
 
 // ---------- boot ----------
+window.addEventListener('unhandledrejection', e => { console.error('UNHANDLED', e.reason && (e.reason.stack || e.reason.message || e.reason)); try { alertBox(L('エラー：', '오류: ') + (e.reason && e.reason.message || e.reason)); } catch {} });
+window.addEventListener('error', e => console.error('ERROR', e.message));
 (async () => {
   setLang(lang); navLabels();
   profile = await S.get('profile');

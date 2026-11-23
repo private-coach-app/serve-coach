@@ -148,15 +148,19 @@ export function findServes(t) {
     let j = i; while (j + 1 < n && (high[j + 1] || (j + 2 < n && high[j + 2]))) j++;
     if ((j - i) / fps >= 0.3) {
       let tro = -1, km = Infinity, peakF = i, peak = -9;
-      for (let f = Math.max(0, i - Math.round(0.2 * fps)); f <= j; f++) if (knee[f] < km) { km = knee[f]; tro = f; }
       for (let f = i; f <= j; f++) if (th[f] > peak) { peak = th[f]; peakF = f; }
+      // trophy = deepest knee while the toss arm is up (from just before the toss peak to the end of the toss)
+      for (let f = Math.max(i, peakF - Math.round(0.25 * fps)); f <= j; f++) if (knee[f] < km) { km = knee[f]; tro = f; }
+      if (tro < 0) tro = peakF;
       serves.push({ toss: i, end: j, tro, peakF });
     }
     i = j;
   }
-  const ctx = { knee, bodyH, tossW, racket, leftToss };
+  const ratio = median(frames.map((p, i) => p && vis(p, 11) && vis(p, 12) ? Math.abs(p[11].x - p[12].x) / torso : NaN));
+  const view = ratio < 0.45 ? 'side' : ratio < 0.75 ? 'oblique' : 'front';
+  const ctx = { knee, bodyH, tossW, racket, leftToss, torso, view, ratio };
   serves.forEach(s => Object.assign(s, measure(t, ctx, s)));
-  return { serves, ctx, knee };
+  return { serves, ctx, knee, view };
 }
 
 export function measure(t, ctx, s) {
@@ -169,12 +173,34 @@ export function measure(t, ctx, s) {
   // toss position: wrist x at peak vs front foot, along hitting direction (+ = in front)
   let tossPos = NaN, dir = 0;
   const pe = frames[Math.min(frames.length - 1, s.end + Math.round(0.6 * fps))];
-  if (p && pe && vis(p, 23) && vis(p, 24) && vis(pe, 23) && vis(pe, 24)) dir = Math.sign(((pe[23].x + pe[24].x) - (p[23].x + p[24].x)) / 2);
+  // hitting direction: vote of (a) hip travel after the serve, (b) toss hand vs shoulders at the peak, (c) nose vs ears at the peak
+  let vote = 0; const B = ctx.bodyH || 1;
+  if (p && pe && vis(p, 23) && vis(p, 24) && vis(pe, 23) && vis(pe, 24)) { const d = ((pe[23].x + pe[24].x) - (p[23].x + p[24].x)) / 2 / B; if (Math.abs(d) > 0.03) vote += Math.sign(d) * 1.0; }
+  if (pk && vis(pk, ctx.tossW) && vis(pk, 11) && vis(pk, 12)) { const d = (pk[ctx.tossW].x - (pk[11].x + pk[12].x) / 2) / B; if (Math.abs(d) > 0.02) vote += Math.sign(d) * 1.2; }
+  if (pk && vis(pk, 0) && vis(pk, 7) && vis(pk, 8)) { const d = (pk[0].x - (pk[7].x + pk[8].x) / 2) / B; if (Math.abs(d) > 0.01) vote += Math.sign(d) * 0.8; }
+  dir = Math.sign(vote);
   if (dir && pk && vis(pk, ctx.tossW) && vis(pk, 27) && vis(pk, 28)) {
     const front = dir > 0 ? Math.max(pk[27].x, pk[28].x) : Math.min(pk[27].x, pk[28].x);
     tossPos = (pk[ctx.tossW].x - front) * dir / ctx.bodyH;
   }
-  return { knee: isFinite(knee) ? knee : NaN, elbow, tossH, tossPos, hold: (s.end - s.toss) / fps };
+  return { knee: isFinite(knee) ? knee : NaN, elbow, tossH, tossPos, hold: (s.end - s.toss) / fps, dir: dir || 1 };
+}
+
+// Approximate frames for the six phases of one serve (ready, release, trophy, racket drop, impact, follow-through).
+export function phaseFrames(t, s) {
+  const f = t.fps, n = t.n - 1, cl = x => Math.max(0, Math.min(n, Math.round(x)));
+  const imp = cl(s.end + 0.05 * f);
+  return [cl(s.toss - 0.35 * f), cl(s.toss), s.tro, cl((s.tro + imp) / 2), imp, cl(imp + 0.45 * f)];
+}
+// User's angles at a frame, comparable with the ideal model.
+export function anglesAt(t, ctx, i) {
+  const p = t.frames[i]; if (!p) return {};
+  const lk = vis(p, 23) && vis(p, 25) && vis(p, 27) ? ang(p, 23, 25, 27) : NaN, rk = vis(p, 24) && vis(p, 26) && vis(p, 28) ? ang(p, 24, 26, 28) : NaN;
+  const knee = isNaN(lk) ? rk : isNaN(rk) ? lk : Math.min(lk, rk);
+  const elbow = ctx.racket.every(q => vis(p, q)) ? ang(p, ...ctx.racket) : NaN;
+  const sIdx = ctx.tossW === 15 ? 11 : 12;
+  const toss = vis(p, sIdx) && vis(p, ctx.tossW) ? Math.atan2(Math.abs(p[ctx.tossW].x - p[sIdx].x), p[ctx.tossW].y - p[sIdx].y) * 180 / Math.PI : NaN;
+  return { knee, elbow, toss };
 }
 
 // Re-measure when the user moves the trophy frame by hand.
@@ -205,5 +231,6 @@ export function drawFrame(canvas, video, p, opts = {}) {
   }
   c.fillStyle = '#FFFFFF';
   for (const j of [0, ...new Set(EDGES.flat())]) if (vis(p, j)) { c.beginPath(); c.arc(tx(p[j]), ty(p[j]), lw * 1.1, 0, 7); c.fill(); }
+  if (opts.after) opts.after(c, q => [tx(q), ty(q)], k);
   return canvas;
 }
