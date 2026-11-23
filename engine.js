@@ -1,0 +1,164 @@
+// Pose analysis engine: MediaPipe Pose (full) in the browser, serve detection, metrics.
+import { FilesetResolver, PoseLandmarker } from './vision_bundle.mjs';
+import { L } from './i18n.js';
+
+export const EDGES = [[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],[23,25],[25,27],[24,26],[26,28]];
+let fileset = null, landmarker = null, TS = 0;
+
+const idbOpen = () => new Promise((res, rej) => {
+  const r = indexedDB.open('serve-coach-models', 1);
+  r.onupgradeneeded = () => r.result.createObjectStore('m');
+  r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+});
+async function idbGet(k) { const db = await idbOpen(); return new Promise((res, rej) => { const q = db.transaction('m').objectStore('m').get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); }
+async function idbSet(k, v) { const db = await idbOpen(); return new Promise((res, rej) => { const t = db.transaction('m', 'readwrite'); t.objectStore('m').put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); }); }
+
+async function modelBytes() {
+  const KEY = 'pose_full_v1';
+  try { const hit = await idbGet(KEY); if (hit) return hit; } catch {}
+  const txt = await (await fetch(new URL('models/pose_landmarker_full.b64.txt', location.href).href)).text();
+  const bin = atob(txt.trim()); const u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  try { await idbSet(KEY, u); } catch {}
+  return u;
+}
+
+let loading = null;
+export function loadEngine(say) { say && say(L('分析エンジンを準備中…', '분석 엔진을 준비하는 중…')); return loading || (loading = _load().catch(e => { loading = null; throw e; })); }
+async function _load(say) {
+  if (landmarker) return landmarker;
+  fileset = fileset || await FilesetResolver.forVisionTasks(new URL('wasm', location.href).href);
+  const buf = await modelBytes();
+  try {
+    landmarker = await PoseLandmarker.createFromOptions(fileset, { baseOptions: { modelAssetBuffer: buf, delegate: 'GPU' }, runningMode: 'VIDEO', numPoses: 1 });
+  } catch {
+    landmarker = await PoseLandmarker.createFromOptions(fileset, { baseOptions: { modelAssetBuffer: buf, delegate: 'CPU' }, runningMode: 'VIDEO', numPoses: 1 });
+  }
+  return landmarker;
+}
+
+export function seek(v, t) {
+  return new Promise(res => { const h = () => { v.removeEventListener('seeked', h); res(); }; v.addEventListener('seeked', h); v.currentTime = t; });
+}
+
+export function ang(p, a, b, c) {
+  const A = p[a], B = p[b], C = p[c];
+  if (!A || !B || !C) return NaN;
+  const ux = A.x - B.x, uy = A.y - B.y, vx = C.x - B.x, vy = C.y - B.y;
+  const cos = (ux * vx + uy * vy) / (Math.hypot(ux, uy) * Math.hypot(vx, vy) + 1e-9);
+  return Math.acos(Math.max(-1, Math.min(1, cos))) * 180 / Math.PI;
+}
+const vis = (p, i, t = 0.5) => p && p[i] && p[i].v >= t;
+function rollMed(x, w) {
+  return x.map((_, i) => { const s = x.slice(Math.max(0, i - (w >> 1)), i + (w >> 1) + 1).filter(v => !isNaN(v)).sort((p, q) => p - q); return s.length ? s[s.length >> 1] : NaN; });
+}
+const median = a => { const s = a.filter(v => !isNaN(v)).sort((p, q) => p - q); return s.length ? s[s.length >> 1] : NaN; };
+
+export async function openVideo(file) {
+  const v = document.createElement('video');
+  v.muted = true; v.playsInline = true; v.preload = 'auto'; v.setAttribute('playsinline', '');
+  v.style.cssText = 'position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none';
+  document.body.appendChild(v);
+  v.src = URL.createObjectURL(file);
+  await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = () => rej(new Error(L('動画を開けません', '영상을 열 수 없습니다'))); });
+  return v;
+}
+
+// Run pose on every frame. Returns per-frame landmark arrays (pixel coords + visibility).
+export async function trackPose(video, fps, onProgress) {
+  const det = landmarker;
+  const dur = video.duration, n = Math.floor(dur * fps), W = video.videoWidth, H = video.videoHeight;
+  const frames = []; let found = 0;
+  for (let i = 0; i < n; i++) {
+    await seek(video, Math.min(dur - 0.001, (i + 0.5) / fps));
+    TS += Math.round(1000 / fps);
+    const r = det.detectForVideo(video, TS);
+    const p = r.landmarks && r.landmarks[0] ? r.landmarks[0].map(q => ({ x: q.x * W, y: q.y * H, v: q.visibility ?? 1 })) : null;
+    if (p) found++;
+    frames.push(p);
+    if (i % 6 === 0) { onProgress && onProgress(i / n); await new Promise(r => setTimeout(r)); }
+  }
+  return { frames, n, W, H, fps, dur, detectRate: n ? found / n : 0 };
+}
+
+// Serve detection (v2 rules) + per-serve metrics.
+export function findServes(t) {
+  const { frames, n, fps } = t;
+  const leg = (p, h, k, a) => p && vis(p, h, .6) && vis(p, k, .6) && vis(p, a, .6) ? ang(p, h, k, a) : NaN;
+  let knee = frames.map(p => { const l = leg(p, 23, 25, 27), r = leg(p, 24, 26, 28); return isNaN(l) ? r : isNaN(r) ? l : (l + r) / 2; });
+  const med = rollMed(knee, 9); knee = knee.map((v, i) => Math.abs(v - med[i]) > 15 ? NaN : v); knee = rollMed(knee, 5);
+  const shY = frames.map(p => p ? (p[11].y + p[12].y) / 2 : NaN), hipY = frames.map(p => p ? (p[23].y + p[24].y) / 2 : NaN);
+  const torso = median(frames.map((p, i) => hipY[i] - shY[i]));
+  const bodyH = median(frames.map(p => p && vis(p, 0) && vis(p, 27) && vis(p, 28) ? ((p[27].y + p[28].y) / 2 - p[0].y) * 1.08 : NaN));
+  const wh = w => frames.map((p, i) => p && vis(p, w) ? (shY[i] - p[w].y) / torso : NaN);
+  const lw = wh(15), rw = wh(16);
+  const cnt = a => a.filter(v => v > 0.3).length;
+  const leftToss = cnt(lw) >= cnt(rw);
+  const th = leftToss ? lw : rw, tossW = leftToss ? 15 : 16;
+  const racket = leftToss ? [12, 14, 16] : [11, 13, 15];
+  const high = th.map(v => v > 0.3);
+  const serves = [];
+  for (let i = 0; i < n; i++) {
+    if (!high[i]) continue;
+    let j = i; while (j + 1 < n && (high[j + 1] || (j + 2 < n && high[j + 2]))) j++;
+    if ((j - i) / fps >= 0.3) {
+      let tro = -1, km = Infinity, peakF = i, peak = -9;
+      for (let f = Math.max(0, i - Math.round(0.2 * fps)); f <= j; f++) if (knee[f] < km) { km = knee[f]; tro = f; }
+      for (let f = i; f <= j; f++) if (th[f] > peak) { peak = th[f]; peakF = f; }
+      serves.push({ toss: i, end: j, tro, peakF });
+    }
+    i = j;
+  }
+  const ctx = { knee, bodyH, tossW, racket, leftToss };
+  serves.forEach(s => Object.assign(s, measure(t, ctx, s)));
+  return { serves, ctx, knee };
+}
+
+export function measure(t, ctx, s) {
+  const { frames, fps } = t;
+  const p = frames[s.tro], pk = frames[s.peakF];
+  const knee = ctx.knee[s.tro];
+  const elbow = p && ctx.racket.every(q => vis(p, q)) ? ang(p, ...ctx.racket) : NaN;
+  const ank = pk && vis(pk, 27) && vis(pk, 28) ? (pk[27].y + pk[28].y) / 2 : NaN;
+  const tossH = pk && vis(pk, ctx.tossW) ? (ank - pk[ctx.tossW].y) / ctx.bodyH : NaN;
+  // toss position: wrist x at peak vs front foot, along hitting direction (+ = in front)
+  let tossPos = NaN, dir = 0;
+  const pe = frames[Math.min(frames.length - 1, s.end + Math.round(0.6 * fps))];
+  if (p && pe && vis(p, 23) && vis(p, 24) && vis(pe, 23) && vis(pe, 24)) dir = Math.sign(((pe[23].x + pe[24].x) - (p[23].x + p[24].x)) / 2);
+  if (dir && pk && vis(pk, ctx.tossW) && vis(pk, 27) && vis(pk, 28)) {
+    const front = dir > 0 ? Math.max(pk[27].x, pk[28].x) : Math.min(pk[27].x, pk[28].x);
+    tossPos = (pk[ctx.tossW].x - front) * dir / ctx.bodyH;
+  }
+  return { knee: isFinite(knee) ? knee : NaN, elbow, tossH, tossPos, hold: (s.end - s.toss) / fps };
+}
+
+// Re-measure when the user moves the trophy frame by hand.
+export function remeasure(t, ctx, s, newTro) { const s2 = { ...s, tro: newTro }; Object.assign(s2, measure(t, ctx, s2)); return s2; }
+
+export function drawFrame(canvas, video, p, opts = {}) {
+  const W = video.videoWidth, H = video.videoHeight;
+  let sx = 0, sy = 0, sw = W, sh = H;
+  if (opts.crop && p) { // crop to person, 9:16 box
+    const xs = p.filter(q => q.v >= .5).map(q => q.x), ys = p.filter(q => q.v >= .5).map(q => q.y);
+    if (xs.length > 4) {
+      const cx = (Math.min(...xs) + Math.max(...xs)) / 2, top = Math.min(...ys), bot = Math.max(...ys);
+      sh = Math.min(H, (bot - top) * 1.9); sw = Math.min(W, sh * 9 / 16); sh = sw * 16 / 9;
+      sx = Math.max(0, Math.min(W - sw, cx - sw / 2)); sy = Math.max(0, Math.min(H - sh, (top + bot) / 2 - sh * 0.45));
+    }
+  }
+  const cw = opts.w || sw, ch = opts.h || sh;
+  canvas.width = cw; canvas.height = ch;
+  const c = canvas.getContext('2d');
+  c.drawImage(video, sx, sy, sw, sh, 0, 0, cw, ch);
+  if (!p) return canvas;
+  const k = cw / sw, tx = q => (q.x - sx) * k, ty = q => (q.y - sy) * k, lw = Math.max(3, cw / 110);
+  c.lineCap = 'round';
+  for (const [a, b] of EDGES) if (vis(p, a) && vis(p, b)) {
+    const bad = opts.highlight && opts.highlight.includes(a) && opts.highlight.includes(b);
+    c.strokeStyle = bad ? '#F08A3C' : '#7BE0A3'; c.lineWidth = bad ? lw * 1.6 : lw;
+    c.beginPath(); c.moveTo(tx(p[a]), ty(p[a])); c.lineTo(tx(p[b]), ty(p[b])); c.stroke();
+  }
+  c.fillStyle = '#FFFFFF';
+  for (const j of [0, ...new Set(EDGES.flat())]) if (vis(p, j)) { c.beginPath(); c.arc(tx(p[j]), ty(p[j]), lw * 1.1, 0, 7); c.fill(); }
+  return canvas;
+}
