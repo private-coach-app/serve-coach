@@ -63,7 +63,11 @@ async function _load() {
 }
 
 export function seek(v, t) {
-  return new Promise(res => { const h = () => { v.removeEventListener('seeked', h); res(); }; v.addEventListener('seeked', h); v.currentTime = t; });
+  return new Promise(res => {
+    let done = false; const fin = () => { if (!done) { done = true; v.removeEventListener('seeked', fin); res(); } };
+    v.addEventListener('seeked', fin); v.currentTime = t;
+    setTimeout(fin, 2000); // never hang on a missed seeked event
+  });
 }
 
 export function ang(p, a, b, c) {
@@ -79,13 +83,29 @@ function rollMed(x, w) {
 }
 const median = a => { const s = a.filter(v => !isNaN(v)).sort((p, q) => p - q); return s.length ? s[s.length >> 1] : NaN; };
 
-export async function openVideo(file) {
+// Create the video element synchronously inside the user gesture (iOS needs this), then wait until frames are decodable.
+export function makeVideo(file) {
   const v = document.createElement('video');
-  v.muted = true; v.playsInline = true; v.preload = 'auto'; v.setAttribute('playsinline', '');
-  v.style.cssText = 'position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none';
+  v.muted = true; v.defaultMuted = true; v.playsInline = true; v.preload = 'auto';
+  v.setAttribute('playsinline', ''); v.setAttribute('webkit-playsinline', ''); v.setAttribute('muted', '');
+  v.style.cssText = 'position:fixed;left:0;top:0;width:2px;height:2px;opacity:0.01;pointer-events:none';
   document.body.appendChild(v);
   v.src = URL.createObjectURL(file);
-  await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = () => rej(new Error(L('動画を開けません', '영상을 열 수 없습니다'))); });
+  v.load();
+  return v;
+}
+export async function openVideo(v, timeoutMs = 20000) {
+  if (v.readyState >= 2) return v;
+  await new Promise((res, rej) => {
+    let done = false; const ok = () => { if (!done) { done = true; res(); } };
+    v.addEventListener('loadeddata', ok, { once: true });
+    v.addEventListener('canplay', ok, { once: true });
+    v.addEventListener('error', () => { if (!done) { done = true; rej(new Error(L('動画を開けません(形式未対応の可能性)', '영상을 열 수 없어요(지원하지 않는 형식일 수 있어요)'))); } }, { once: true });
+    // iOS Safari may not decode until playback starts: a muted inline play/pause forces it
+    v.addEventListener('loadedmetadata', () => { const p = v.play(); if (p && p.then) p.then(() => { v.pause(); ok(); }).catch(() => {}); }, { once: true });
+    setTimeout(() => { if (!done) { done = true; rej(new Error(L('動画の読み込みが止まりました。別の動画で試すか、ページを再読み込みしてください。', '영상 불러오기가 멈췄어요. 다른 영상으로 해 보거나 페이지를 새로고침해 주세요.'))); } }, timeoutMs);
+  });
+  v.pause();
   return v;
 }
 

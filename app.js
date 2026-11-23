@@ -125,7 +125,7 @@ async function capture() {
   <div id="prog" class="card hide"><b id="pt">${L('準備中…', '준비 중…')}</b><div class="bar"><i id="pb"></i></div><div class="msg" id="ps"></div></div>`;
   $('#pick').onclick = () => $('#file').click();
   bindEngineCard();
-  $('#file').onchange = e => { const f = e.target.files[0]; if (f) analyse(f); };
+  $('#file').onchange = e => { const f = e.target.files[0]; if (!f) return; if (work && work.video) { URL.revokeObjectURL(work.video.src); work.video.remove(); work = null; } const v = E.makeVideo(f); analyse(v); };
 }
 let unsubEng = null, stallTimer = null;
 function bindEngineCard() {
@@ -153,16 +153,17 @@ function bindEngineCard() {
   $('#retry').onclick = () => { E.loadEngine().catch(() => {}); };
   if (E.engineState.phase === 'idle' || E.engineState.phase === 'error') E.loadEngine().catch(() => {});
 }
-async function analyse(file) {
+async function analyse(vEl) {
   const pb = $('#pb'), pt = $('#pt'), ps = $('#ps');
   $('#prog').classList.remove('hide'); $('#pick').disabled = true;
   const t0 = performance.now();
   try {
+    pt.textContent = L('分析を開始します…', '분석을 시작해요…');
     if (E.engineState.phase !== 'ready') pt.textContent = L('エンジンの準備ができ次第、分析を始めます…', '엔진 준비가 끝나면 바로 분석을 시작해요…');
     await E.loadEngine();
     $('#eng') && $('#eng').classList.add('hide');
-    if (work && work.video) { URL.revokeObjectURL(work.video.src); work.video.remove(); }
-    const video = await E.openVideo(file);
+    pt.textContent = L('動画を読み込み中…', '영상을 불러오는 중…');
+    const video = await E.openVideo(vEl);
     pt.textContent = L('フォームを読み取り中…', '자세를 읽는 중…');
     const tr = await E.trackPose(video, FPS, f => { pb.style.width = (f * 100).toFixed(0) + '%'; ps.textContent = `${(f * video.duration).toFixed(0)} / ${video.duration.toFixed(0)}${L('秒', '초')}`; });
     pb.style.width = '100%';
