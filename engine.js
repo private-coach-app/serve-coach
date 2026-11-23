@@ -13,27 +13,52 @@ const idbOpen = () => new Promise((res, rej) => {
 async function idbGet(k) { const db = await idbOpen(); return new Promise((res, rej) => { const q = db.transaction('m').objectStore('m').get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); }
 async function idbSet(k, v) { const db = await idbOpen(); return new Promise((res, rej) => { const t = db.transaction('m', 'readwrite'); t.objectStore('m').put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); }); }
 
-async function modelBytes() {
+// ---- engine loading with visible progress ----
+const WASM_BYTES = 14665716, MODEL_BYTES = 9398198;
+export const engineState = { phase: 'idle', loaded: 0, total: WASM_BYTES + MODEL_BYTES, error: null, t: Date.now() };
+const subs = new Set();
+export function onEngine(fn) { subs.add(fn); fn(engineState); return () => subs.delete(fn); }
+function emit(patch) { Object.assign(engineState, patch, { t: Date.now() }); subs.forEach(f => { try { f(engineState); } catch {} }); }
+
+async function fetchBytes(url, base) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status} ${url.split('/').pop()}`);
+  if (!r.body || !r.body.getReader) { const u = new Uint8Array(await r.arrayBuffer()); emit({ loaded: base + u.length }); return u; }
+  const rd = r.body.getReader(), parts = []; let n = 0;
+  for (;;) { const { done, value } = await rd.read(); if (done) break; parts.push(value); n += value.length; emit({ loaded: base + n }); }
+  const u = new Uint8Array(n); let o = 0; for (const p of parts) { u.set(p, o); o += p.length; } return u;
+}
+async function modelBytes(base) {
   const KEY = 'pose_full_v1';
-  try { const hit = await idbGet(KEY); if (hit) return hit; } catch {}
-  const txt = await (await fetch(new URL('models/pose_landmarker_full.b64.txt', location.href).href)).text();
-  const bin = atob(txt.trim()); const u = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  try { const hit = await idbGet(KEY); if (hit) { emit({ loaded: base + MODEL_BYTES }); return hit; } } catch {}
+  let u;
+  try { u = await fetchBytes(new URL('models/pose_landmarker_full.task', location.href).href, base); }
+  catch { // artifact hosting cannot serve .task; fall back to base64 copy
+    const txt = new TextDecoder().decode(await fetchBytes(new URL('models/pose_landmarker_full.b64.txt', location.href).href, base));
+    const bin = atob(txt.trim()); u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  }
   try { await idbSet(KEY, u); } catch {}
   return u;
 }
 
 let loading = null;
-export function loadEngine(say) { say && say(L('分析エンジンを準備中…', '분석 엔진을 준비하는 중…')); return loading || (loading = _load().catch(e => { loading = null; throw e; })); }
-async function _load(say) {
+export function loadEngine() { return loading || (loading = _load().catch(e => { loading = null; emit({ phase: 'error', error: e.message || String(e) }); throw e; })); }
+async function _load() {
   if (landmarker) return landmarker;
+  emit({ phase: 'download', loaded: 0, error: null });
+  // warm the HTTP/service-worker cache for the wasm so MediaPipe's own fetch is instant, with progress
+  let warm = false; try { warm = localStorage.getItem('sc_wasm_v1') === '1'; } catch {}
+  if (!warm) { await fetchBytes(new URL('wasm/vision_wasm_internal.wasm', location.href).href, 0); try { localStorage.setItem('sc_wasm_v1', '1'); } catch {} }
+  else emit({ loaded: WASM_BYTES });
+  const buf = await modelBytes(WASM_BYTES);
+  emit({ phase: 'init', loaded: engineState.total });
   fileset = fileset || await FilesetResolver.forVisionTasks(new URL('wasm', location.href).href);
-  const buf = await modelBytes();
   try {
     landmarker = await PoseLandmarker.createFromOptions(fileset, { baseOptions: { modelAssetBuffer: buf, delegate: 'GPU' }, runningMode: 'VIDEO', numPoses: 1 });
   } catch {
     landmarker = await PoseLandmarker.createFromOptions(fileset, { baseOptions: { modelAssetBuffer: buf, delegate: 'CPU' }, runningMode: 'VIDEO', numPoses: 1 });
   }
+  emit({ phase: 'ready' });
   return landmarker;
 }
 

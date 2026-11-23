@@ -2,3 +2,4 @@
 *.mov
 *.MOV
 .DS_Store
+models/*.b64.txt

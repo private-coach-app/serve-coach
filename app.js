@@ -121,16 +121,46 @@ async function capture() {
   <div class="card"><b>${L('撮影チェック', '촬영 체크')}</b><div class="msg">${L('① 体の<b>横</b>から(ネットと平行の向き) ② スマホは縦、腰の高さで固定 ③ 頭上のボールまで画面に入れる ④ できれば<b>スローモーションか60fps</b> ⑤ サーブ3〜5本', '① 몸 <b>옆</b>에서 (네트와 평행한 방향) ② 폰 세로, 허리 높이 고정 ③ 머리 위 공까지 화면 안 ④ 가능하면 <b>슬로모션 또는 60fps</b> ⑤ 서브 3~5개')}</div></div>
   <input type="file" id="file" accept="video/*" class="hide">
   <button class="btn ball" id="pick">${L('動画を選ぶ / 撮影する', '영상 고르기 / 촬영')}</button>
+  <div id="eng" class="card"><b id="et"></b><div class="bar"><i id="eb"></i></div><div class="msg" id="es"></div><button class="btn ghost hide" id="retry">${L('再試行', '다시 시도')}</button></div>
   <div id="prog" class="card hide"><b id="pt">${L('準備中…', '준비 중…')}</b><div class="bar"><i id="pb"></i></div><div class="msg" id="ps"></div></div>`;
   $('#pick').onclick = () => $('#file').click();
+  bindEngineCard();
   $('#file').onchange = e => { const f = e.target.files[0]; if (f) analyse(f); };
+}
+let unsubEng = null, stallTimer = null;
+function bindEngineCard() {
+  if (unsubEng) unsubEng();
+  clearInterval(stallTimer);
+  const mb = b => (b / 1048576).toFixed(1);
+  const paint = st => {
+    const et = $('#et'); if (!et) { unsubEng && unsubEng(); clearInterval(stallTimer); return; }
+    const eb = $('#eb'), es = $('#es'), rt = $('#retry');
+    rt.classList.toggle('hide', st.phase !== 'error');
+    $('#eng').classList.toggle('hide', st.phase === 'ready' && !$('#prog').classList.contains('hide'));
+    if (st.phase === 'ready') { et.textContent = L('✓ 分析エンジン準備完了', '✓ 분석 엔진 준비 완료'); eb.style.width = '100%'; es.textContent = L('動画を選ぶとすぐに分析が始まります。', '영상을 고르면 바로 분석을 시작해요.'); return; }
+    if (st.phase === 'error') { et.textContent = L('エンジンを読み込めませんでした', '엔진을 불러오지 못했어요'); es.textContent = L('通信を確認して「再試行」を押してください。', '인터넷 연결을 확인하고 「다시 시도」를 눌러 주세요.') + ' (' + st.error + ')'; return; }
+    if (st.phase === 'init') { et.textContent = L('分析エンジンを起動中…(2/2)', '분석 엔진 시작 중… (2/2)'); eb.style.width = '100%'; es.textContent = L('数秒〜20秒ほどかかります。', '몇 초~20초 정도 걸려요.'); return; }
+    et.textContent = L('分析エンジンをダウンロード中…(1/2)', '분석 엔진 내려받는 중… (1/2)');
+    eb.style.width = Math.min(100, st.loaded / st.total * 100).toFixed(0) + '%';
+    es.textContent = `${mb(st.loaded)} / ${mb(st.total)} MB · ` + L('初回のみ。Wi-Fi推奨', '처음 한 번만 받아요. Wi-Fi 권장');
+  };
+  unsubEng = E.onEngine(paint);
+  stallTimer = setInterval(() => {
+    const st = E.engineState, es = $('#es'); if (!es) return clearInterval(stallTimer);
+    if ((st.phase === 'download' || st.phase === 'init') && Date.now() - st.t > 25000)
+      es.textContent = L('25秒以上進んでいません。通信が遅いか止まっている可能性があります。そのまま待つか、ページを再読み込みしてください。', '25초 넘게 진행이 없어요. 연결이 느리거나 멈췄을 수 있어요. 조금 더 기다리거나 페이지를 새로고침해 주세요.');
+  }, 5000);
+  $('#retry').onclick = () => { E.loadEngine().catch(() => {}); };
+  if (E.engineState.phase === 'idle' || E.engineState.phase === 'error') E.loadEngine().catch(() => {});
 }
 async function analyse(file) {
   const pb = $('#pb'), pt = $('#pt'), ps = $('#ps');
   $('#prog').classList.remove('hide'); $('#pick').disabled = true;
   const t0 = performance.now();
   try {
-    await E.loadEngine(m => pt.textContent = m);
+    if (E.engineState.phase !== 'ready') pt.textContent = L('エンジンの準備ができ次第、分析を始めます…', '엔진 준비가 끝나면 바로 분석을 시작해요…');
+    await E.loadEngine();
+    $('#eng') && $('#eng').classList.add('hide');
     if (work && work.video) { URL.revokeObjectURL(work.video.src); work.video.remove(); }
     const video = await E.openVideo(file);
     pt.textContent = L('フォームを読み取り中…', '자세를 읽는 중…');
