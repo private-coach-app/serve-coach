@@ -65,7 +65,7 @@ export function correct(item, P, d, level, side, value) {
     for (const j of [0, 2, 5, 7, 8, 11, 12, 13, 14, 15, 16]) if (Q[j]) Q[j].y += drop; // upper body sinks with the hips
     for (const h of [23, 24]) if (Q[h] && !legs.some(l => l[0] === h)) Q[h].y += drop;
     return { to: Q, parts: [[23, 25], [25, 27], [24, 26], [26, 28]], target,
-      cue: L(`トスと一緒に、ひざを約${target}°まで曲げる。`, `토스와 함께 무릎을 약 ${target}°까지 굽히기.`) };
+      cue: side.kind && side.kind !== 'serve' ? L(`ラケットを後ろに引くときに、ひざを約${target}°まで曲げる。`, `라켓을 뒤로 뺄 때 무릎을 약 ${target}°까지 굽히기.`) : L(`トスと一緒に、ひざを約${target}°まで曲げる。`, `토스와 함께 무릎을 약 ${target}°까지 굽히기.`) };
   }
   // ---- ground strokes ----
   const armTo = (tx, ty) => {            // racket arm reaches for (tx, ty): shoulder stays, elbow hangs below the line
@@ -86,15 +86,20 @@ export function correct(item, P, d, level, side, value) {
   if (item === 'finish') {
     if (!ok(P, rs, re, rw)) return null;
     const reach = len(P[rs], P[re]) + len(P[re], P[rw]);
-    armTo(P[rs].x + d * 0.45 * reach, P[rs].y - 0.7 * reach);
-    return { to: Q, parts: [[rs, re], [re, rw]], cue: L('打ったあとも止めずに、手が肩より上に来るまで振り抜く。', '친 뒤에도 멈추지 말고, 손이 어깨 위에 올 때까지 휘두르기.') };
+    armTo(P[rs].x + d * 0.15 * reach, P[rs].y - 0.6 * reach);
+    return { to: Q, parts: [[rs, re], [re, rw]], cue: L('打ったあとも止めずに、手が肩より上に来るまで振る。', '친 뒤에도 멈추지 말고, 손이 어깨 위에 올 때까지 휘두르기.') };
   }
   if (item === 'weight') {
-    if (!ok(P, 11, 12, 23, 24)) return null;
-    const dx = d * 0.1 * H;
+    if (!ok(P, 11, 12, 23, 24) || !(P[27] && P[28] && P[27].v >= 0.3 && P[28].v >= 0.3)) return null;
+    // hips (and everything above) move until they sit 65% of the way from the back foot to the front foot
+    const a = P[27].x * d, b = P[28].x * d, back = Math.min(a, b), front = Math.max(a, b), hip = (P[23].x + P[24].x) / 2 * d;
+    const dx = ((back + 0.65 * (front - back)) - hip) * d;
+    if (!(Math.abs(dx) > 2) || dx * d < 0) return null;
     for (const j of [0, 2, 5, 7, 8, 11, 12, 13, 14, 15, 16, 23, 24]) if (Q[j]) Q[j].x += dx;
     for (const j of [25, 26]) if (Q[j]) Q[j].x += dx * 0.5;
-    return { to: Q, parts: [[11, 23], [12, 24], [23, 25], [24, 26]], cue: L('打ちながら、腰ごと前足の上へ移動する。', '치면서 허리째로 앞발 위로 옮겨 가기.') };
+    const hy = (P[23].y + P[24].y) / 2, hx = (P[23].x + P[24].x) / 2;
+    return { to: Q, parts: [[11, 23], [12, 24], [23, 25], [24, 26]], arrow: { x: hx, y: hy, dx },
+      cue: L('前足を踏み込んで、腰ごと前足の上へ移る(矢印の向き)。', '앞발을 내디디며 허리째로 앞발 위로 옮겨 가기(화살표 방향).') };
   }
   return null;
 }
@@ -116,6 +121,12 @@ export function playFix(canvas, img, P, fix) {
     for (const [a, b] of EDGES) if (P[a] && P[b] && P[a].v >= .5 && P[b].v >= .5 && !key.has(a + '-' + b)) line(M[a], M[b], 'rgba(255,255,255,.8)', lw * 0.7);
     for (const [a, b] of fix.parts) if (P[a] && P[b]) line(P[a], P[b], '#F08A3C', lw * 1.2, [lw * 1.5, lw]);
     for (const [a, b] of fix.parts) if (M[a] && M[b]) line(M[a], M[b], '#3D8BFF', lw * 1.6);
+    if (fix.arrow) {                                           // direction arrow (weight shift)
+      const ax = fix.arrow.x * sc, ay = fix.arrow.y * sc, L2 = Math.max(W * 0.18, Math.abs(fix.arrow.dx) * sc * 1.6) * Math.sign(fix.arrow.dx), hd = lw * 3;
+      c.setLineDash([]); c.strokeStyle = '#D9E43A'; c.fillStyle = '#D9E43A'; c.lineWidth = lw * 1.2;
+      c.beginPath(); c.moveTo(ax, ay); c.lineTo(ax + L2, ay); c.stroke();
+      c.beginPath(); c.moveTo(ax + L2 + Math.sign(L2) * hd, ay); c.lineTo(ax + L2, ay - hd * 0.7); c.lineTo(ax + L2, ay + hd * 0.7); c.closePath(); c.fill();
+    }
     if (fix.mark) { c.setLineDash([]); c.strokeStyle = '#D9E43A'; c.lineWidth = lw; c.beginPath(); c.arc(fix.mark.x * sc, fix.mark.y * sc, lw * 2.4, 0, 7); c.stroke(); }
     // label chip
     c.setLineDash([]); const fs = Math.round(W / 13), txt = e < 0.5 ? L('今', '지금') : L('目標', '목표');

@@ -243,31 +243,41 @@ export function findStrokes(t, hand = 'r', kind = 'forehand') {
   const R = hand === 'l' ? [11, 13, 15] : [12, 14, 16], O = hand === 'l' ? [12, 14, 16] : [11, 13, 15], rw = R[2];
   const knee = kneeSeries(frames);
   const torso = median(frames.map(p => p ? (p[23].y + p[24].y) / 2 - (p[11].y + p[12].y) / 2 : NaN));
-  const bodyH = median(frames.map(p => p && vis(p, 0) && vis(p, 27) && vis(p, 28) ? ((p[27].y + p[28].y) / 2 - p[0].y) * 1.08 : NaN));
-  // racket-hand x with short gaps filled, then speed along the picture in body heights per second
-  const x = frames.map(p => p && vis(p, rw, 0.15) ? p[rw].x : NaN);   // low bar: the hand blurs during the swing, an estimated position is enough for timing
-  for (let i = 1; i < n - 1; i++) if (isNaN(x[i])) { let a = i - 1, b = i + 1; while (b < n && isNaN(x[b]) && b - a <= 6) b++; if (!isNaN(x[a]) && b < n && !isNaN(x[b]) && b - a <= 6) x[i] = x[a] + (x[b] - x[a]) * (i - a) / (b - a); }
+  // body height: one visible ankle is enough (the far ankle is often hidden from the side); fall back to the torso
+  let bodyH = median(frames.map(p => { if (!p || !vis(p, 0)) return NaN; const a = [27, 28].filter(i => vis(p, i)).map(i => p[i].y); return a.length ? (Math.max(...a) - p[0].y) * 1.08 : NaN; }));
+  if (!(bodyH > 0)) bodyH = torso * 3.3;
+  // racket-hand x with short gaps filled (low visibility bar: the hand blurs during the swing, an estimated position is enough for timing)
+  const x = frames.map(p => p && vis(p, rw, 0.15) ? p[rw].x : NaN);
+  for (let i = 1; i < n - 1; i++) if (isNaN(x[i])) { let a = i - 1, b = i + 1; while (b < n && isNaN(x[b]) && b - a <= 10) b++; if (!isNaN(x[a]) && b < n && !isNaN(x[b]) && b - a <= 10) x[i] = x[a] + (x[b] - x[a]) * (i - a) / (b - a); }
   let vx = x.map((_, i) => i > 0 && i < n - 1 ? (x[i + 1] - x[i - 1]) * fps / 2 / (bodyH || 1) : NaN);
   vx = vx.map((_, i) => { const w = [vx[i - 1], vx[i], vx[i + 1]].filter(Number.isFinite); return w.length ? w.reduce((a, b) => a + b, 0) / w.length : NaN; });
-  // hitting direction: the forward swing is the fastest hand movement in the video
+  const hipX = i => { const p = frames[i]; return p && vis(p, 23) && vis(p, 24) ? (p[23].x + p[24].x) / 2 : NaN; };
+  // hitting direction, first from the face (the player looks where the ball goes: from the side the nose sits ahead of the ears) ...
+  const face = median(frames.map(p => p && vis(p, 0) && vis(p, 7) && vis(p, 8) ? (p[0].x - (p[7].x + p[8].x) / 2) / (bodyH || 1) : NaN));
+  // ... then from the hand: the forward swing is normally the fastest hand movement
   const sp = vx.map(Math.abs), top = pct(sp, 0.97), fast = vx.filter(v => Math.abs(v) >= top && Number.isFinite(v));
-  const pos = fast.filter(v => v > 0).length, dir = pos * 2 >= fast.length ? 1 : -1;
-  const agree = fast.length ? Math.max(pos, fast.length - pos) / fast.length : 0;
-  const f = vx.map(v => v * dir), gap = Math.round(0.8 * fps);
+  const pos = fast.filter(v => v > 0).length, handDir = pos * 2 >= fast.length ? 1 : -1, agree = fast.length ? Math.max(pos, fast.length - pos) / fast.length : 0;
+  const faceDir = Math.abs(face) >= 0.004 ? Math.sign(face) : 0;
+  const dir = faceDir || handDir;
+  const f = vx.map(v => v * dir), gap = Math.round(1.2 * fps);
   // a swing must be clearly faster than walking or getting ready, and at least half as fast as the fastest swing in the video
   const TH = Math.max(1.2, 0.5 * pct(f, 0.995));
   const peaks = [];
   for (let i = 1; i < n - 1; i++) if (f[i] > TH && f[i] >= f[i - 1] && f[i] >= f[i + 1]) {
+    // shape check: before a real swing the hand goes back behind the hips (takeback)
+    let back = false; for (let k = Math.max(0, i - Math.round(1.2 * fps)); k < i && !back; k++) if ((x[k] - hipX(k)) * dir < -0.05 * bodyH) back = true;
+    if (!back) continue;
     const last = peaks[peaks.length - 1];
     if (last !== undefined && i - last < gap) { if (f[i] > f[last]) peaks[peaks.length - 1] = i; } else peaks.push(i);
   }
-  // the face looks where the ball goes: seen from the side the nose sits ahead of the ears
-  const face = median(peaks.map(c => { const p = frames[c]; return p && vis(p, 0) && vis(p, 7) && vis(p, 8) ? (p[0].x - (p[7].x + p[8].x) / 2) * dir / (bodyH || 1) : NaN; }));
-  const dirSure = agree >= 0.75 && peaks.length > 0;
-  const view = dirSure && face > 0.008 ? 'side' : 'unsure';
-  const ctx = { kind, knee, bodyH, torso, racket: R, tossS: O[0], tossE: O[1], tossW: O[2], dir, dirSure, view, slow: false, x, f };
+  // is the racket hand actually visible around contact? (hidden = filmed from the wrong side)
+  const handVis = median(peaks.map(c => { const p = frames[c]; return p ? p[rw].v : NaN; }));
+  // why the video cannot be judged, if so: 'front' (not from the side), 'dir' (direction unclear), 'side' (racket arm hidden), '' = fine
+  const problem = !faceDir ? 'front' : (peaks.length && faceDir !== handDir && agree >= 0.75) ? 'dir' : (peaks.length && handVis < 0.5) ? 'side' : '';
+  const dirSure = !problem && peaks.length > 0;
+  const ctx = { kind, knee, bodyH, torso, racket: R, tossS: O[0], tossE: O[1], tossW: O[2], dir, dirSure, view: problem ? 'unsure' : 'side', problem, slow: false, x, f };
   const serves = peaks.map(c => { const s = { tro: c, peak: f[c] }; Object.assign(s, measureStroke(t, ctx, s)); return s; });
-  return { serves, ctx, knee, view };
+  return { serves, ctx, knee, view: ctx.view };
 }
 export function measureStroke(t, ctx, s) {
   const { frames, fps, n } = t, c = s.tro, dir = ctx.dir, rw = ctx.racket[2], B = ctx.bodyH || NaN;
@@ -275,16 +285,25 @@ export function measureStroke(t, ctx, s) {
   // takeback: racket hand furthest back within 1.2 s before contact
   let tb = Math.max(0, c - Math.round(0.4 * fps)), far = Infinity;
   for (let i = Math.max(0, c - Math.round(1.2 * fps)); i < c; i++) { const v = (ctx.x[i] - hipX(i)) * dir; if (v < far) { far = v; tb = i; } }
-  // finish: racket hand highest within 0.7 s after contact
+  // finish: racket hand highest within 0.7 s after contact (estimated positions count: the hand often wraps behind the body)
   let fin = Math.min(n - 1, c + Math.round(0.35 * fps)), hi = Infinity;
-  for (let i = c + 1; i <= Math.min(n - 1, c + Math.round(0.7 * fps)); i++) { const p = frames[i]; if (p && vis(p, rw, 0.4) && p[rw].y < hi) { hi = p[rw].y; fin = i; } }
+  for (let i = c + 1; i <= Math.min(n - 1, c + Math.round(0.7 * fps)); i++) { const p = frames[i]; if (p && vis(p, rw, 0.15) && p[rw].y < hi) { hi = p[rw].y; fin = i; } }
   let kf = c, km = Infinity; for (let i = tb; i <= c; i++) if (ctx.knee[i] < km) { km = ctx.knee[i]; kf = i; }
-  const pc = frames[c], pf = frames[fin];
-  const contact = pc && vis(pc, rw, 0.4) ? (pc[rw].x - hipX(c)) * dir / B : NaN;
-  const weight = (hipX(fin) - hipX(tb)) * dir / B;
+  const pf = frames[fin];
+  // contact (reference only): racket hand vs hips at the chosen frame
+  const contact = Number.isFinite(ctx.x[c]) ? (ctx.x[c] - hipX(c)) * dir / B : NaN;
+  // where the hips end up between the feet: 0 = over the back foot, 1 = over the front foot (independent of camera distance and of walking)
+  let weight = NaN;
+  if (pf && vis(pf, 27, 0.3) && vis(pf, 28, 0.3)) {
+    const a = pf[27].x * dir, b = pf[28].x * dir, back = Math.min(a, b), front = Math.max(a, b);
+    if (front - back > 0.08 * B) weight = (hipX(fin) * dir - back) / (front - back);
+  }
   const knee = Number.isFinite(km) ? km : NaN;
-  const finish = pf && vis(pf, rw, 0.4) && vis(pf, 11) && vis(pf, 12) && ctx.torso > 0 ? ((pf[11].y + pf[12].y) / 2 - pf[rw].y) / ctx.torso : NaN;
-  return { tb, fin, kf, contact, weight, knee, finish, dir };
+  const finish = pf && vis(pf, rw, 0.15) && vis(pf, 11) && vis(pf, 12) && ctx.torso > 0 ? ((pf[11].y + pf[12].y) / 2 - pf[rw].y) / ctx.torso : NaN;
+  // forehand or backhand? at the takeback the shoulder away from the racket hand points to the net on a forehand, the racket-side shoulder on a backhand
+  const pt = frames[tb]; let type = '';
+  if (pt && vis(pt, 11) && vis(pt, 12)) { const o = ctx.racket[0] === 12 ? 11 : 12, d = (pt[o].x - pt[ctx.racket[0]].x) * dir / B; type = d > 0.03 ? 'forehand' : d < -0.03 ? 'backhand' : ''; }
+  return { tb, fin, kf, contact, weight, knee, finish, dir, type };
 }
 // Which frame shows an item best (for the "how to fix" picture).
 export function frameOf(ctx, s, k) { return ctx.kind === 'serve' ? s.tro : k === 'knee' ? s.kf : k === 'finish' || k === 'weight' ? s.fin : s.tro; }

@@ -85,8 +85,11 @@ async function setup() {
 
 const taskShort = s => s.task === 'keep' ? L('今のフォームをそのまま続ける', '지금 자세 그대로 이어 가기') : motionOf(s).items[s.task].short(s.metrics[s.task]);
 // motion picker (serve / forehand / backhand); the choice is remembered
-const motionChips = () => `<div class="row mot" id="mot">${Object.values(MOTIONS).map(m => `<button class="chip ${m.id === motion ? 'on' : ''}" data-m="${m.id}">${m.name()}</button>`).join('')}</div>`;
-function bindMotion() { const el = $('#mot'); if (el) el.onclick = e => { const b = e.target.closest('.chip'); if (!b || b.dataset.m === motion) return; motion = b.dataset.m; S.set('motion', motion); go(curRoute, curArg); }; }
+let hasRec = {};   // which motions already have a record (shown as a dot on the chip)
+const motionChips = () => `<div class="row mot" id="mot">${Object.values(MOTIONS).map(m => `<button class="chip ${m.id === motion ? 'on' : ''}" data-m="${m.id}">${m.name()}${hasRec[m.id] ? '<i class="dot"></i>' : ''}</button>`).join('')}</div>`;
+// one line per other motion that has a task, so all weekly tasks are visible from Home
+const otherTasks = all => { const rows = Object.values(MOTIONS).filter(m => m.id !== motion).map(m => { const l = all.filter(x => motionOf(x).id === m.id).pop(); return l ? `<button class="oth" data-m="${m.id}"><b>${m.name()}</b>：${esc(taskShort(l))}<span>›</span></button>` : ''; }).join(''); return rows ? `<h2>${L('ほかの動きの課題', '다른 동작의 과제')}</h2><div id="oth">${rows}</div>` : ''; };
+function bindMotion() { const pick = e => { const b = e.target.closest('[data-m]'); if (!b || b.dataset.m === motion) return; motion = b.dataset.m; S.set('motion', motion); go(curRoute, curArg); }; for (const id of ['#mot', '#oth']) { const el = $(id); if (el) el.onclick = pick; } }
 const taskMsg = s => s.task === 'keep' ? L('大きく直すところは見当たりません。同じリズムで繰り返して、体に覚えさせましょう。', '크게 고칠 곳은 보이지 않아요. 같은 리듬으로 반복해서 몸에 익혀요.') : motionOf(s).items[s.task].msg(s.metrics[s.task]);
 
 // ---------- schedule pieces ----------
@@ -107,11 +110,12 @@ function bindChecks(id, done) {
 
 // ---------- home ----------
 async function home() {
-  const all = await S.sessions(); if (curRoute !== 'home') return; const M = MOTIONS[motion], ss = all.filter(x => motionOf(x).id === motion), last = ss[ss.length - 1];
+  const all = await S.sessions(); if (curRoute !== 'home') return; hasRec = {}; all.forEach(x => { hasRec[motionOf(x).id] = true; }); const M = MOTIONS[motion], ss = all.filter(x => motionOf(x).id === motion), last = ss[ss.length - 1];
   if (!last) {
-    app.innerHTML = `${motionChips()}<h1>${L(`${M.name()}を分析しましょう`, `${M.name()}를 분석해 볼까요?`)}</h1>
+    app.innerHTML = `${motionChips()}<h1>${all.length ? L(`${M.name()}はまだ分析していません`, `${M.name()}는 아직 분석 전이에요`) : L(`${M.name()}を分析しましょう`, `${M.name()}를 분석해 볼까요?`)}</h1>
     <div class="card hero"><div class="k">${L('用意するもの', '준비물')}</div><div class="t">${L(`横から撮った${M.name()}の動画1本`, `옆에서 찍은 ${M.name()} 영상 1개`)}</div><div class="hs">${L(`${M.name()}が3〜5${M.unit()}入った20〜60秒の動画がおすすめです。`, `${M.name()} 3~5${M.unit()}가 들어간 20~60초 영상을 추천해요.`)}</div></div>
     <button class="btn ball" id="go">${L('動画を選んで分析する', '영상 고르고 분석하기')}</button>
+    ${otherTasks(all)}
     <div class="note">${L('できること：フォーム分析 → 今週直すところを1つ → 毎日の練習メニュー → 1週間後に撮り直して比べる', '할 수 있는 것: 자세 분석 → 이번 주 고칠 곳 1개 → 매일 연습 메뉴 → 1주일 뒤 다시 찍어 비교')}</div>`;
     bindMotion(); $('#go').onclick = () => go('capture'); return;
   }
@@ -125,7 +129,8 @@ async function home() {
   <div class="hs">${dleft > 0 ? L(`次の撮影まで あと${dleft}日`, `다음 촬영까지 ${dleft}일`) : L('今日はもう一度撮影して比べる日です', '오늘은 다시 촬영해서 비교하는 날이에요')}</div></div>
   ${idx >= 0 ? `<h2>${L('今日やること', '오늘 할 일')}</h2><div class="card">${dayHtml(last, idx, done, true)}</div>` : `<div class="note">${L('今週の予定は終わりました。もう一度撮影して、前回と比べましょう。', '이번 주 일정이 끝났어요. 다시 촬영해서 지난번과 비교해 봐요.')}</div>`}
   <button class="btn ${due ? 'ball' : 'ghost'}" id="re">${due ? L('撮り直して比べる', '다시 찍고 비교하기') : L('新しい動画を分析する', '새 영상 분석하기')}</button>
-  <button class="btn ghost" id="rep">${L('直し方をもう一度見る', '고치는 법 다시 보기')}</button>`;
+  <button class="btn ghost" id="rep">${L('直し方をもう一度見る', '고치는 법 다시 보기')}</button>
+  ${otherTasks(all)}`;
   bindChecks(last.id, done); bindMotion();
   $('#re').onclick = () => go('capture'); $('#rep').onclick = () => go('view', last.id);
 }
@@ -133,26 +138,27 @@ async function home() {
 // ---------- capture / analyse ----------
 async function capture() {
   const M = MOTIONS[motion], isS = motion === 'serve';
+  const pr = (profile.hand !== 'l') === (motion !== 'backhand');   // phone on the player's right (seen facing the net) or left: the side the chest faces
   app.innerHTML = `${motionChips()}<h1>${L(`${M.name()}の動画を撮る・選ぶ`, `${M.name()} 영상 찍기·고르기`)}</h1>
   <div class="card guidec"><svg viewBox="0 0 200 150" class="court">
   <rect x="30" y="8" width="140" height="120" fill="#3F7D5B" rx="4"/><path d="M30 20h140" stroke="#fff" stroke-width="3" stroke-dasharray="2 3"/><path d="M30 112h140M100 20v50M52 70h96M52 20v92M148 20v92" stroke="#fff" stroke-width="1.5" fill="none"/>
   <text x="100" y="16" font-size="8" fill="#fff" text-anchor="middle">${L('ネット', '네트')}</text>
   <circle cx="112" cy="120" r="6" fill="#D9E43A" stroke="#14211A" stroke-width="1.5"/><text x="112" y="140" font-size="9" fill="#14211A" text-anchor="middle" font-weight="700">${L('あなた', '나')}</text>
   <path d="M112 112v-22" stroke="#D9E43A" stroke-width="2" marker-end="url(#ah)"/><defs><marker id="ah" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0 0l6 3-6 3z" fill="#D9E43A"/></marker></defs>
-  <rect x="178" y="112" width="10" height="16" rx="2" fill="#14211A"/><path d="M176 120h-52" stroke="#14211A" stroke-width="1.5" stroke-dasharray="3 3"/><text x="183" y="140" font-size="9" fill="#14211A" text-anchor="middle" font-weight="700">${L('スマホ', '폰')}</text></svg>
-  <ol class="howto"><li>${L('<b>真横</b>から撮る(ベースラインの延長線上にスマホ)', '<b>바로 옆</b>에서 찍기 (베이스라인 연장선에 폰)')}</li>
+  <rect x="${pr ? 178 : 12}" y="112" width="10" height="16" rx="2" fill="#14211A"/><path d="${pr ? 'M176 120h-52' : 'M24 120h76'}" stroke="#14211A" stroke-width="1.5" stroke-dasharray="3 3"/><text x="${pr ? 183 : 17}" y="140" font-size="9" fill="#14211A" text-anchor="middle" font-weight="700">${L('スマホ', '폰')}</text></svg>
+  <ol class="howto"><li>${L('<b>真横</b>から撮る(ベースラインの延長線上にスマホ)', '<b>바로 옆</b>에서 찍기 (베이스라인 연장선에 폰)')}${L(`。ネットに向かって<b>${pr ? '右' : '左'}側</b>(打つときに胸が向く側)にスマホ`, `. 네트를 바라보고 <b>${pr ? '오른쪽' : '왼쪽'}</b>(칠 때 가슴이 향하는 쪽)에 폰`)}</li>
   <li>${L('スマホは<b>縦向き</b>、腰の高さで固定', '폰은 <b>세로</b>, 허리 높이에 고정')}</li>
   <li>${isS ? L('頭の上のボールから足先まで、<b>全身</b>を入れる', '머리 위 공부터 발끝까지 <b>온몸</b>이 나오게') : L('頭から足先まで<b>全身</b>を入れる(左右に少し余裕を)', '머리부터 발끝까지 <b>온몸</b>이 나오게 (좌우로 조금 여유 있게)')}</li>
   <li>${L('自分のカメラアプリで撮るときは<b>ふつうの動画</b>で(スローモーションは使えません)', '폰 카메라 앱으로 찍을 땐 <b>일반 동영상</b>으로 (슬로모션은 쓸 수 없어요)')}</li>
-  <li>${isS ? L('サーブを<b>3〜5本</b>', '서브 <b>3~5개</b>') : L(`${M.name()}を<b>3〜5回</b>(ボールを出してもらうか、素振りでもOK)`, `${M.name()}를 <b>3~5회</b> (공을 던져 받거나, 빈 스윙도 OK)`)}</li></ol></div>
+  <li>${isS ? L('サーブを<b>3〜5本</b>', '서브 <b>3~5개</b>') : L(`${M.name()}を<b>3〜5回</b>(ボールを軽く投げてもらって打つか、ボールなしの素振りでもOK)`, `${M.name()}를 <b>3~5회</b> (공을 가볍게 던져 주면 치거나, 공 없이 빈 스윙도 OK)`)}</li></ol></div>
   <input type="file" id="file" accept="video/*" class="hide">
-  ${cameraSupported() ? `<button class="btn ball" id="camb">${L('📷 ガイド付きカメラで撮る', '📷 가이드 카메라로 찍기')}</button><p class="sub c">${L(`立つ位置のガイドが出て、${M.name()}を3${M.unit()}数えて自動で止まります。`, `서는 위치 가이드가 나오고, ${M.name()} 3${M.unit()}를 세면 자동으로 멈춰요.`)}</p>` : ''}
+  ${cameraSupported() ? `<button class="btn ball" id="camb">${L('📷 ガイド付きカメラで撮る', '📷 가이드 카메라로 찍기')}</button><p class="sub c">${L(`立ち位置のガイドが出て、3${M.unit()}打つと自動で止まります。`, `서는 위치 가이드가 나오고, 3${M.unit()} 치면 자동으로 멈춰요.`)}</p>` : ''}
   <button class="btn ${cameraSupported() ? 'ghost' : 'ball'}" id="pick">${L('撮ってある動画を選ぶ', '찍어 둔 영상 고르기')}</button>
   <p class="sub c">🔒 ${L('動画はこのスマホの中だけで分析します。どこにも送信されません。', '영상은 이 폰 안에서만 분석해요. 어디로도 전송되지 않아요.')}</p>
   <div id="eng" class="card"><b id="et"></b><div class="bar"><i id="eb"></i></div><div class="msg" id="es"></div><button class="btn ghost hide" id="retry">${L('もう一度試す', '다시 시도')}</button></div>
   <div id="prog" class="card hide"><b id="pt"></b><div class="bar"><i id="pb"></i></div><div class="msg" id="ps"></div></div>`;
   $('#pick').onclick = () => $('#file').click();
-  const cb = $('#camb'); if (cb) cb.onclick = () => openCamera({ kind: motion, hand: profile.hand, name: M.name(), unit: M.unit(), onDone: blob => { if (curRoute !== 'capture' || !blob) return; if (work && work.video) { URL.revokeObjectURL(work.video.src); work.video.remove(); work = null; } analyse(E.makeVideo(blob)); } });
+  const cb = $('#camb'); if (cb) cb.onclick = () => openCamera({ onPick: () => $('#file') && $('#file').click(), kind: motion, hand: profile.hand, name: M.name(), unit: M.unit(), onDone: blob => { if (curRoute !== 'capture' || !blob) return; if (work && work.video) { URL.revokeObjectURL(work.video.src); work.video.remove(); work = null; } analyse(E.makeVideo(blob)); } });
   bindEngineCard(); bindMotion();
   // the video element must be created inside this tap handler (iOS)
   $('#file').onchange = e => { const f = e.target.files[0]; if (!f) return; if (work && work.video) { URL.revokeObjectURL(work.video.src); work.video.remove(); work = null; } analyse(E.makeVideo(f)); };
@@ -196,6 +202,13 @@ async function analyse(vEl) {
     const r = motion === 'serve' ? E.findServes(tr, profile.hand) : E.findStrokes(tr, profile.hand, motion);
     work = { video, tr, ...r, motion, sel: r.serves.map(() => true) };
     if (tr.detectRate < 0.5) return failBox(L('人がうまく映っていませんでした。全身が大きく映るように撮り直してください。', '사람이 잘 잡히지 않았어요. 온몸이 크게 나오게 다시 찍어 주세요.'));
+    if (motion !== 'serve' && r.ctx.problem) return failBox({
+      front: L('真横からの動画ではないようです。上の図のようにスマホを置いて、撮り直してください。', '바로 옆에서 찍은 영상이 아닌 것 같아요. 위 그림처럼 폰을 두고 다시 찍어 주세요.'),
+      dir: L('打つ向きを読み取れませんでした。ゆっくりの素振りだけだと判定できないことがあります。ボールを打つか、ふつうの速さで振った動画でお試しください。', '치는 방향을 읽지 못했어요. 천천히 하는 빈 스윙만으로는 판정하지 못할 수 있어요. 공을 치거나 보통 속도로 휘두른 영상으로 해 보세요.'),
+      side: L('ラケットを持つ手が体に隠れています。スマホを反対側に置いて、撮り直してください。', '라켓 든 손이 몸에 가려져 있어요. 폰을 반대쪽에 두고 다시 찍어 주세요.'),
+    }[r.ctx.problem]);
+    // swings that look like the other stroke (forehand vs backhand) are left out, as long as some match
+    if (motion !== 'serve' && r.serves.some(x => x.type === motion)) { let k = 0; r.serves.forEach((x, i) => { if (x.type && x.type !== motion) { work.sel[i] = false; k++; } }); work.dropped = k; }
     if (!r.serves.length) return failBox(motion === 'serve' ? L('サーブが見つかりませんでした。トスの腕が頭より上まで映っているか確認してください。', '서브를 찾지 못했어요. 토스하는 팔이 머리 위까지 화면에 나오는지 확인해 주세요.') : L('スイングが見つかりませんでした。真横から、ラケットを持つ手が映るように撮ってください。', '스윙을 찾지 못했어요. 바로 옆에서, 라켓 든 손이 보이게 찍어 주세요.'));
     go('mark');
   } catch (e) { failBox(L('分析できませんでした：', '분석하지 못했어요: ') + e.message); console.error(e); }
@@ -212,14 +225,15 @@ async function mark() {
   if (!work) return go('capture');
   const n = work.serves.length, M = MOTIONS[work.motion], isS = work.motion === 'serve';
   app.innerHTML = `<h1>${L(`${M.name()}を${n}${M.unit()}見つけました`, `${M.name()} ${n}${M.unit()}를 찾았어요`)}</h1>
-  <p class="sub">${isS ? L('打つ直前の場面です。サーブではない場面が混ざっていたら、選んで外してください。', '치기 직전 장면이에요. 서브가 아닌 장면이 섞여 있으면 골라서 빼 주세요.') : L('ボールを打つあたりの場面です。違う動きが混ざっていたら、選んで外してください。', '공을 치는 즈음의 장면이에요. 다른 동작이 섞여 있으면 골라서 빼 주세요.')}</p>
+  <p class="sub">${isS ? L('打つ直前の場面です。サーブではない場面が混ざっていたら、選んで外してください。', '치기 직전 장면이에요. 서브가 아닌 장면이 섞여 있으면 골라서 빼 주세요.') : L('ボールに当たる前後の場面です。違う動きが混ざっていたら、選んで外してください。', '공을 치는 앞뒤 장면이에요. 다른 동작이 섞였으면 골라서 빼 주세요.')}</p>
+  ${work.dropped ? `<div class="note">${L(`${M.name()}ではなさそうなスイングを${work.dropped}回、外してあります(選び直せます)。`, `${M.name()}가 아닌 것 같은 스윙 ${work.dropped}회를 빼 두었어요 (다시 넣을 수 있어요).`)}</div>` : ''}
   ${work.ctx.slow ? `<div class="note">${L('スローモーションの動画のようです。時間に関する項目は今回は測れません。', '슬로모션 영상인 것 같아요. 시간과 관련된 항목은 이번엔 잴 수 없어요.')}</div>` : ''}
   <div class="serves" id="sv"></div>
   <div id="adjw" class="card hide"><div class="bigw"><canvas id="big"></canvas></div>
   <button class="btn ghost" id="tog"></button>
   <details class="fold"><summary>${L('場面を細かく調整する', '장면 세부 조정')}</summary><div class="adj"><button class="btn ghost" id="m1">◀ ${L('少し前', '조금 앞')}</button><button class="btn ghost" id="p1">${L('少し後', '조금 뒤')} ▶</button></div>
   <div class="msg">${isS ? L('ひざがいちばん曲がった瞬間に合わせると、より正確になります。', '무릎이 가장 굽은 순간에 맞추면 더 정확해져요.') : L('ボールに当たる瞬間に合わせると、より正確になります。', '공에 맞는 순간에 맞추면 더 정확해져요.')}</div></details></div>
-  <div class="stick"><button class="btn ball" id="ok">${L('この内容で結果を見る', '이대로 결과 보기')}</button></div>`;
+  <div style="height:20px"></div><div class="stick"><button class="btn ball" id="ok">${L('この内容で結果を見る', '이대로 결과 보기')}</button></div>`;
   $('#ok').onclick = async () => {
     if (!work.sel.some(Boolean)) return alertBox(L('場面を1つ以上残してください。', '장면을 하나 이상 남겨 주세요.'));
     const b = $('#ok'); if (b.disabled) return; b.disabled = true; b.textContent = L('結果を作っています…', '결과를 만드는 중…');
@@ -246,13 +260,14 @@ async function buildSession() {
   const metrics = {}; for (const k of M.order) metrics[k] = med(used.map(s => s[k]));
   const j = judgeAll(M, metrics, profile.level);
   const ss = (await S.sessions()).filter(x => motionOf(x).id === M.id), prev = ss[ss.length - 1], today = ymd();
+  if (M.order.every(k => M.items[k].ref || j[k] === 'na')) throw new Error(L('この動画では測れませんでした。全身が映るように、真横から撮り直してください。', '이 영상으로는 잴 수 없었어요. 온몸이 나오게 바로 옆에서 다시 찍어 주세요.'));
   const task = pickTask(M, j);
   // "same task again" only counts when about a week has passed
   const repeat = prev && prev.task === task && task !== 'keep' ? (dayDiff(prev.date, today) >= 5 ? (prev.repeat || 0) + 1 : (prev.repeat || 0)) : 0;
   // representative rep: the one closest to the median on the task item (so the picture matches the number)
-  const key = task !== 'keep' && fin(metrics[task]) ? task : M.order.find(k => fin(metrics[k]));
+  const key = task !== 'keep' && fin(metrics[task]) ? task : M.order.find(k => fin(metrics[k]) && !M.items[k].ref);
   const rep = key ? used.reduce((a, b) => Math.abs(b[key] - metrics[key]) < Math.abs(a[key] - metrics[key]) || !fin(a[key]) ? b : a, used[0]) : used[0];
-  const side = { tossS: ctx.tossS, tossE: ctx.tossE, tossW: ctx.tossW, racket: ctx.racket };
+  const side = { tossS: ctx.tossS, tossE: ctx.tossE, tossW: ctx.tossW, racket: ctx.racket, kind: ctx.kind };
   const mainF = task !== 'keep' ? E.frameOf(ctx, rep, task) : rep.tro;
   const img = (await frameAt(mainF, 540, task !== 'keep' ? jointsFor(M, task, side) : [])).toDataURL('image/jpeg', 0.82);
   // clean photo + landmark positions for each item to fix (one photo per distinct moment)
@@ -295,6 +310,7 @@ async function view(id) {
   <div class="card hero"><div class="k">${s.task === 'keep' ? L('今週は', '이번 주는') : L('今週はこれだけ', '이번 주엔 이것만')}${s.repeat ? L(` · ${s.repeat + 1}週目`, ` · ${s.repeat + 1}주째`) : ''}</div>
   <div class="t">${esc(taskShort(s))}</div><div class="hs">${esc(taskMsg(s))}</div>
   ${s.repeat >= 2 ? `<div class="hs">${L('3週続けて同じ課題です。一度コーチに動画を見てもらうのがおすすめです。', '3주째 같은 과제예요. 코치에게 영상을 한 번 보여 주는 걸 추천해요.')}</div>` : ''}</div>
+  ${isS ? '' : `<div class="note">${L('フォアハンド・バックハンドの判定は試験中です。目安として見て、まず1つだけ試してみましょう。', '포핸드·백핸드 판정은 시험 중이에요. 참고로 보고, 우선 하나만 해 보세요.')}</div>`}
   ${mainFix ? `<div class="card fixmain"><b>${L('直し方(あなたのフォームで)', '고치는 법 (내 자세로)')}</b><canvas data-fix="${s.task}" width="360" height="640"></canvas>${legend()}<div class="cue">${esc(mainFix.cue)}</div></div>`
             : `<img class="frame main" src="${s.img}" alt="">`}
   <h2>${dayTitle}</h2><div class="card">${dayHtml(s, ti, done, true)}
@@ -364,7 +380,7 @@ async function history() {
   ${ss.length ? `<div id="delw"><button class="btn ghost" id="clr">${L('いちばん新しい記録を削除', '가장 최근 기록 삭제')}</button></div>` : ''}`;
   app.querySelectorAll('[data-id]').forEach(c => c.onclick = () => go('view', +c.dataset.id));
   const clr = $('#clr'); if (clr) clr.onclick = () => {
-    $('#delw').innerHTML = `<p class="sub c">${L(`${md(ss[0].date)}の記録を削除しますか？`, `${md(ss[0].date)} 기록을 삭제할까요?`)}</p><div class="adj"><button class="btn ghost" id="no">${L('やめる', '취소')}</button><button class="btn" id="yes">${L('削除する', '삭제하기')}</button></div>`;
+    $('#delw').innerHTML = `<p class="sub c">${L(`${md(ss[0].date)}の${motionOf(ss[0]).name()}の記録を削除しますか？`, `${md(ss[0].date)} ${motionOf(ss[0]).name()} 기록을 삭제할까요?`)}</p><div class="adj"><button class="btn ghost" id="no">${L('やめる', '취소')}</button><button class="btn" id="yes">${L('削除する', '삭제하기')}</button></div>`;
     $('#no').onclick = () => go('history'); $('#yes').onclick = async () => { await S.del(ss[0].id); go('history'); };
   };
 }

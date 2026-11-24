@@ -40,20 +40,19 @@ export function makeCounter() {
 }
 // Stroke counter (forehand / backhand): one fast sideways sweep of the racket hand = one swing.
 export function makeSwingCounter(hand, aspect) {
-  const rw = hand === 'l' ? 15 : 16; let px = NaN, pt = 0, last = 0, count = 0, hot = 0;
+  const rw = hand === 'l' ? 15 : 16; let buf = [], last = 0, count = 0;
   return {
     get count() { return count; },
     feed(p, now) {
-      if (!p || !(p[rw] && p[rw].v >= 0.4 && p[0] && p[0].v >= 0.5 && p[27] && p[28])) { px = NaN; return false; }
-      const H = ((p[27].y + p[28].y) / 2 - p[0].y) * 1.08; if (!(H > 0.1)) { px = NaN; return false; }
-      const x = p[rw].x * aspect / H;                       // in body heights
-      let hit = false;
-      if (Number.isFinite(px) && now > pt) {
-        const v = Math.abs(x - px) / ((now - pt) / 1000);
-        hot = v > 2.2 ? hot + 1 : 0;                        // two fast readings in a row, then wait before counting again
-        if (hot >= 2 && now - last > 900) { last = now; count++; hit = true; }
-      }
-      px = x; pt = now; return hit;
+      if (!p || !(p[rw] && p[rw].v >= 0.4 && p[0] && p[0].v >= 0.5 && p[27] && p[28])) { buf = []; return false; }
+      const H = (Math.max(p[27].y, p[28].y) - p[0].y) * 1.08; if (!(H > 0.1)) { buf = []; return false; }
+      const x = p[rw].x * aspect / H;                                       // hand position in body heights
+      const prev = buf[buf.length - 1];
+      if (prev && Math.abs(x - prev.x) > 0.7) { buf = [{ t: now, x }]; return false; }   // a jump that large is a tracking glitch, not a swing
+      buf.push({ t: now, x }); while (buf.length && now - buf[0].t > 320) buf.shift();
+      // one swing = the hand travels at least half a body height one way within about 0.3 s (a takeback is slower than that)
+      if (buf.length >= 2 && Math.abs(x - buf[0].x) >= 0.5 && now - last > 1200) { last = now; count++; buf = []; return true; }
+      return false;
     },
   };
 }
@@ -68,12 +67,13 @@ export function framing(p) {
   return 'ok';
 }
 
-export async function openCamera({ onDone, kind = 'serve', hand = 'r', name = '', unit = '' }) {
+export async function openCamera({ onDone, onPick, kind = 'serve', hand = 'r', name = '', unit = '' }) {
   const isS = kind === 'serve', newCounter = () => isS ? makeCounter() : makeSwingCounter(hand, (v.videoWidth || 9) / (v.videoHeight || 16));
   const ov = document.createElement('div'); ov.className = 'camov';
   ov.innerHTML = `<div class="stage"><div class="flip" id="cFlip"><video id="cV" playsinline webkit-playsinline muted autoplay></video><canvas id="cC"></canvas></div>
-    <div class="camtop"><button id="cX" aria-label="close">✕</button><div id="cMsg" class="cmsg"></div><button id="cSw" aria-label="switch">⟲</button></div>
+    <div class="camtop"><button id="cX" aria-label="close">✕</button><div class="cmid"><span class="cpill" id="cPill"></span><div id="cMsg" class="cmsg"></div></div><button id="cSw" class="csw"></button><div id="cNum" class="cnum hide"></div></div>
     <div id="cCnt" class="ccnt hide"></div>
+    <div id="cErr" class="cerr hide"><p id="cErrT"></p><button class="btn ball" id="cPick"></button><button class="btn ghost w" id="cRetry"></button></div>
     <div class="cambot"><div id="cHint" class="chint"></div><button id="cGo" class="btn ball"></button><button id="cUse" class="btn ball hide"></button><button id="cRe" class="btn ghost w hide"></button></div></div>`;
   document.body.appendChild(ov);
   const $ = s => ov.querySelector(s), v = $('#cV'), cv = $('#cC'), g = cv.getContext('2d');
@@ -86,22 +86,27 @@ export async function openCamera({ onDone, kind = 'serve', hand = 'r', name = ''
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } } });
     } catch (e) {
-      $('#cMsg').textContent = L('カメラを使えませんでした。カメラの許可を確認するか、「動画を選ぶ」から撮影してください。', '카메라를 쓸 수 없었어요. 카메라 권한을 확인하거나 「영상 고르기」에서 촬영해 주세요.');
-      $('#cGo').classList.add('hide'); return;
+      state = 'error'; ui();
+      $('#cErrT').textContent = L('カメラが使えません。設定でカメラを許可するか、ふだんのカメラで撮った動画を選んでください。', '카메라를 쓸 수 없어요. 설정에서 카메라를 허용하거나, 평소 카메라로 찍은 영상을 골라 주세요.');
+      $('#cPick').textContent = L('閉じて動画を選ぶ', '닫고 영상 고르기'); $('#cRetry').textContent = L('もう一度試す', '다시 시도'); return;
     }
+    if (state === 'error') { state = 'frame'; ui(); }
     v.srcObject = stream; await v.play().catch(() => {});
     $('#cFlip').classList.toggle('mir', facing === 'user');
     try { lock = await navigator.wakeLock.request('screen'); } catch {}
   }
   function ui() {
     const go = $('#cGo'), use = $('#cUse'), re = $('#cRe'), cnt = $('#cCnt'), hint = $('#cHint');
-    go.classList.toggle('hide', state === 'done' || state === 'count'); use.classList.toggle('hide', state !== 'done'); re.classList.toggle('hide', state !== 'done');
-    $('#cSw').classList.toggle('hide', state !== 'frame'); cnt.classList.toggle('hide', state === 'frame');
-    if (state === 'frame') { go.textContent = L('● 撮影スタート(5秒後に開始)', '● 촬영 시작 (5초 뒤 시작)'); hint.textContent = L(`スマホを真横に固定して、足を下の線に合わせて立ってください。${name}を3${unit}打つと自動で止まります。`, `폰을 바로 옆에 고정하고, 발을 아래 선에 맞춰 서 주세요. ${name} 3${unit}를 치면 자동으로 멈춰요.`); }
-    if (state === 'rec') { go.textContent = L('■ ここで終了する', '■ 여기서 끝내기'); hint.textContent = L(`${name}を打ってください。音が鳴ったら1${unit}カウントです。`, `${name}를 쳐 주세요. 소리가 나면 1${unit}로 센 거예요.`); }
-    if (state === 'done') { use.textContent = L('この動画を分析する', '이 영상 분석하기'); re.textContent = L('撮り直す', '다시 찍기'); hint.textContent = counter.count ? L(`${name}を${counter.count}${unit}撮れました。`, `${name} ${counter.count}${unit}를 찍었어요.`) : L('数えられませんでしたが、このまま分析することもできます。', '세지는 못했지만, 이대로 분석할 수도 있어요.'); }
+    const err = state === 'error';
+    go.classList.toggle('hide', state === 'done' || state === 'count' || err); use.classList.toggle('hide', state !== 'done'); re.classList.toggle('hide', state !== 'done');
+    $('#cSw').classList.toggle('hide', state !== 'frame'); cnt.classList.toggle('hide', state !== 'count'); $('#cNum').classList.toggle('hide', state !== 'rec' && state !== 'done');
+    $('#cErr').classList.toggle('hide', !err); hint.classList.toggle('hide', err); $('#cMsg').classList.toggle('hide', err);
+    $('#cPill').textContent = name; $('#cSw').textContent = facing === 'user' ? L('⟲ 外カメラ', '⟲ 후면') : L('⟲ 自撮り', '⟲ 셀카');
+    if (state === 'frame') { go.textContent = L(`● ${name}を撮る(5秒後に開始)`, `● ${name} 촬영 시작 (5초 뒤 시작)`); hint.textContent = L(`スマホを三脚やフェンスに立てかけて真横に置き、足を黄色の線に合わせて立ってください。${name}を3${unit}打つと自動で止まります。`, `폰을 삼각대나 펜스에 세워 바로 옆에 두고, 발을 노란 선에 맞춰 서 주세요. ${name} 3${unit}를 치면 자동으로 멈춰요.`); }
+    if (state === 'rec') { go.textContent = L('■ ここで止める', '■ 여기서 멈추기'); hint.textContent = L(`${name}を打ってください。ピッと鳴ったら1${unit}と数えました。数えられないときは「ここで止める」を押してください。`, `${name}를 쳐 주세요. 삑 소리가 나면 1${unit}로 센 거예요. 세지 못할 때는 「여기서 멈추기」를 눌러 주세요.`); }
+    if (state === 'done') { use.textContent = L('この動画を分析する', '이 영상 분석하기'); re.textContent = L('もう一度撮る', '다시 찍기'); hint.textContent = (counter.count ? L(`${name}を${counter.count}${unit}撮れました。`, `${name} ${counter.count}${unit}를 찍었어요.`) : L('数えられませんでしたが、このまま分析することもできます。', '세지는 못했지만, 이대로 분석할 수도 있어요.')) + L('この動画はアルバムには保存されず、分析だけに使われます。', ' 이 영상은 앨범에 저장되지 않고 분석에만 쓰여요.'); }
   }
-  const showCount = () => { $('#cCnt').innerHTML = `<b>${Math.min(counter.count, TARGET)}</b><span>/ ${TARGET}</span>`; };
+  const showCount = () => { $('#cNum').innerHTML = `<b>${Math.min(counter.count, TARGET)}</b> / ${TARGET}`; };
   function beginRec() {
     const mime = pickMime(); chunks = []; blob = null; counter = newCounter(); stopAt = 0;
     try { rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 5e6 } : undefined); }
@@ -113,14 +118,16 @@ export async function openCamera({ onDone, kind = 'serve', hand = 'r', name = ''
   const endRec = () => { try { if (rec && rec.state !== 'inactive') rec.stop(); } catch {} };
 
   $('#cX').onclick = close;
-  $('#cSw').onclick = async () => { facing = facing === 'user' ? 'environment' : 'user'; await start(); };
+  $('#cSw').onclick = async () => { facing = facing === 'user' ? 'environment' : 'user'; await start(); ui(); };
   $('#cGo').onclick = () => {
     if (state === 'frame') {
-      beep(600, 80); state = 'count'; ui(); let n = 5; const c = $('#cCnt'); c.classList.remove('hide'); c.innerHTML = `<b>${n}</b>`;
-      timer = setInterval(() => { n--; if (n > 0) { c.innerHTML = `<b>${n}</b>`; beep(600, 80); } else { clearInterval(timer); if (!closed) beginRec(); } }, 1000);
+      beep(600, 80); state = 'count'; ui(); let n = 5; const c = $('#cCnt'), cd = k => { c.innerHTML = `<small>${L('開始まで', '시작까지')}</small><b>${k}</b>`; }; cd(n);
+      timer = setInterval(() => { n--; if (n > 0) { cd(n); beep(600, 80); } else { clearInterval(timer); if (!closed) beginRec(); } }, 1000);
     } else if (state === 'rec') endRec();
   };
-  $('#cRe').onclick = () => { state = 'frame'; blob = null; ui(); $('#cCnt').classList.add('hide'); };
+  $('#cRe').onclick = () => { state = 'frame'; blob = null; ui(); };
+  $('#cRetry').onclick = () => start();
+  $('#cPick').onclick = () => { close(); onPick && onPick(); };
   $('#cUse').onclick = () => { const b = blob; close(); onDone(b); };     // called inside the tap, so the analysis may create its video element
 
   function draw(p, fr) {
