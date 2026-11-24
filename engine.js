@@ -197,7 +197,7 @@ export function findServes(t, hand = 'r') {
   // side-view check: seen from the side the hips move clearly across the picture after the hit
   const travel = median(serves.map(s => { const p = frames[s.tro], pe = frames[Math.min(n - 1, s.end + Math.round(0.6 * fps))]; return p && pe ? Math.abs((pe[23].x + pe[24].x) - (p[23].x + p[24].x)) / 2 / B : NaN; }));
   const view = dirSure && !(travel < 0.04) ? 'side' : 'unsure';
-  const ctx = { knee, bodyH, tossW, tossS, tossE, racket, leftToss, swapped, torso, armLen, view, ratio, dir, dirSure, slow };
+  const ctx = { kind: 'serve', knee, bodyH, tossW, tossS, tossE, racket, leftToss, swapped, torso, armLen, view, ratio, dir, dirSure, slow };
   serves.forEach(s => Object.assign(s, measure(t, ctx, s)));
   return { serves, ctx, knee, view };
 }
@@ -231,8 +231,66 @@ export function phaseFrames(t, ctx, s) {
   return [cl(s.toss - 0.5 * f), cl(s.toss), s.tro, cl((s.tro + imp) / 2), imp, cl(imp + 0.45 * f)];
 }
 
-// Re-measure when the user moves the trophy frame by hand.
-export function remeasure(t, ctx, s, newTro) { const s2 = { ...s, tro: newTro }; Object.assign(s2, measure(t, ctx, s2)); return s2; }
+// ---------- ground strokes (forehand / backhand), side view ----------
+// One stroke = one fast forward swing of the racket hand. Key frames: tb (hand furthest back), c (fastest forward moment ≈ contact), fin (hand highest after contact).
+function kneeSeries(frames) {
+  const leg = (p, h, k, a) => p && vis(p, h, .6) && vis(p, k, .6) && vis(p, a, .6) ? ang(p, h, k, a) : NaN;
+  let knee = frames.map(p => { const l = leg(p, 23, 25, 27), r = leg(p, 24, 26, 28); return isNaN(l) ? r : isNaN(r) ? l : (l + r) / 2; });
+  const med9 = rollMed(knee, 9); knee = knee.map((v, i) => Math.abs(v - med9[i]) > 25 ? NaN : v); return rollMed(knee, 3);
+}
+export function findStrokes(t, hand = 'r', kind = 'forehand') {
+  const { frames, n, fps } = t;
+  const R = hand === 'l' ? [11, 13, 15] : [12, 14, 16], O = hand === 'l' ? [12, 14, 16] : [11, 13, 15], rw = R[2];
+  const knee = kneeSeries(frames);
+  const torso = median(frames.map(p => p ? (p[23].y + p[24].y) / 2 - (p[11].y + p[12].y) / 2 : NaN));
+  const bodyH = median(frames.map(p => p && vis(p, 0) && vis(p, 27) && vis(p, 28) ? ((p[27].y + p[28].y) / 2 - p[0].y) * 1.08 : NaN));
+  // racket-hand x with short gaps filled, then speed along the picture in body heights per second
+  const x = frames.map(p => p && vis(p, rw, 0.15) ? p[rw].x : NaN);   // low bar: the hand blurs during the swing, an estimated position is enough for timing
+  for (let i = 1; i < n - 1; i++) if (isNaN(x[i])) { let a = i - 1, b = i + 1; while (b < n && isNaN(x[b]) && b - a <= 6) b++; if (!isNaN(x[a]) && b < n && !isNaN(x[b]) && b - a <= 6) x[i] = x[a] + (x[b] - x[a]) * (i - a) / (b - a); }
+  let vx = x.map((_, i) => i > 0 && i < n - 1 ? (x[i + 1] - x[i - 1]) * fps / 2 / (bodyH || 1) : NaN);
+  vx = vx.map((_, i) => { const w = [vx[i - 1], vx[i], vx[i + 1]].filter(Number.isFinite); return w.length ? w.reduce((a, b) => a + b, 0) / w.length : NaN; });
+  // hitting direction: the forward swing is the fastest hand movement in the video
+  const sp = vx.map(Math.abs), top = pct(sp, 0.97), fast = vx.filter(v => Math.abs(v) >= top && Number.isFinite(v));
+  const pos = fast.filter(v => v > 0).length, dir = pos * 2 >= fast.length ? 1 : -1;
+  const agree = fast.length ? Math.max(pos, fast.length - pos) / fast.length : 0;
+  const f = vx.map(v => v * dir), gap = Math.round(0.8 * fps);
+  // a swing must be clearly faster than walking or getting ready, and at least half as fast as the fastest swing in the video
+  const TH = Math.max(1.2, 0.5 * pct(f, 0.995));
+  const peaks = [];
+  for (let i = 1; i < n - 1; i++) if (f[i] > TH && f[i] >= f[i - 1] && f[i] >= f[i + 1]) {
+    const last = peaks[peaks.length - 1];
+    if (last !== undefined && i - last < gap) { if (f[i] > f[last]) peaks[peaks.length - 1] = i; } else peaks.push(i);
+  }
+  // the face looks where the ball goes: seen from the side the nose sits ahead of the ears
+  const face = median(peaks.map(c => { const p = frames[c]; return p && vis(p, 0) && vis(p, 7) && vis(p, 8) ? (p[0].x - (p[7].x + p[8].x) / 2) * dir / (bodyH || 1) : NaN; }));
+  const dirSure = agree >= 0.75 && peaks.length > 0;
+  const view = dirSure && face > 0.008 ? 'side' : 'unsure';
+  const ctx = { kind, knee, bodyH, torso, racket: R, tossS: O[0], tossE: O[1], tossW: O[2], dir, dirSure, view, slow: false, x, f };
+  const serves = peaks.map(c => { const s = { tro: c, peak: f[c] }; Object.assign(s, measureStroke(t, ctx, s)); return s; });
+  return { serves, ctx, knee, view };
+}
+export function measureStroke(t, ctx, s) {
+  const { frames, fps, n } = t, c = s.tro, dir = ctx.dir, rw = ctx.racket[2], B = ctx.bodyH || NaN;
+  const hipX = i => { const p = frames[i]; return p && vis(p, 23) && vis(p, 24) ? (p[23].x + p[24].x) / 2 : NaN; };
+  // takeback: racket hand furthest back within 1.2 s before contact
+  let tb = Math.max(0, c - Math.round(0.4 * fps)), far = Infinity;
+  for (let i = Math.max(0, c - Math.round(1.2 * fps)); i < c; i++) { const v = (ctx.x[i] - hipX(i)) * dir; if (v < far) { far = v; tb = i; } }
+  // finish: racket hand highest within 0.7 s after contact
+  let fin = Math.min(n - 1, c + Math.round(0.35 * fps)), hi = Infinity;
+  for (let i = c + 1; i <= Math.min(n - 1, c + Math.round(0.7 * fps)); i++) { const p = frames[i]; if (p && vis(p, rw, 0.4) && p[rw].y < hi) { hi = p[rw].y; fin = i; } }
+  let kf = c, km = Infinity; for (let i = tb; i <= c; i++) if (ctx.knee[i] < km) { km = ctx.knee[i]; kf = i; }
+  const pc = frames[c], pf = frames[fin];
+  const contact = pc && vis(pc, rw, 0.4) ? (pc[rw].x - hipX(c)) * dir / B : NaN;
+  const weight = (hipX(fin) - hipX(tb)) * dir / B;
+  const knee = Number.isFinite(km) ? km : NaN;
+  const finish = pf && vis(pf, rw, 0.4) && vis(pf, 11) && vis(pf, 12) && ctx.torso > 0 ? ((pf[11].y + pf[12].y) / 2 - pf[rw].y) / ctx.torso : NaN;
+  return { tb, fin, kf, contact, weight, knee, finish, dir };
+}
+// Which frame shows an item best (for the "how to fix" picture).
+export function frameOf(ctx, s, k) { return ctx.kind === 'serve' ? s.tro : k === 'knee' ? s.kf : k === 'finish' || k === 'weight' ? s.fin : s.tro; }
+
+// Re-measure when the user moves the key frame by hand.
+export function remeasure(t, ctx, s, newTro) { const s2 = { ...s, tro: newTro }; Object.assign(s2, ctx.kind === 'serve' ? measure(t, ctx, s2) : measureStroke(t, ctx, s2)); return s2; }
 
 export function drawFrame(canvas, video, p, opts = {}) {
   const W = video.videoWidth, H = video.videoHeight;

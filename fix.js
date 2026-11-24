@@ -67,6 +67,35 @@ export function correct(item, P, d, level, side, value) {
     return { to: Q, parts: [[23, 25], [25, 27], [24, 26], [26, 28]], target,
       cue: L(`トスと一緒に、ひざを約${target}°まで曲げる。`, `토스와 함께 무릎을 약 ${target}°까지 굽히기.`) };
   }
+  // ---- ground strokes ----
+  const armTo = (tx, ty) => {            // racket arm reaches for (tx, ty): shoulder stays, elbow hangs below the line
+    const S = P[rs], l1 = len(P[rs], P[re]), l2 = len(P[re], P[rw]);
+    let dx = tx - S.x, dy = ty - S.y, dd = Math.hypot(dx, dy) || 1; const mx = (l1 + l2) * 0.98, mn = Math.abs(l1 - l2) + 1;
+    const k = Math.max(mn, Math.min(mx, dd)) / dd; dx *= k; dy *= k; dd *= k;
+    const along = (l1 * l1 - l2 * l2 + dd * dd) / (2 * dd), h = Math.sqrt(Math.max(0, l1 * l1 - along * along)), ux = dx / dd, uy = dy / dd;
+    const e1 = { x: S.x + ux * along - uy * h, y: S.y + uy * along + ux * h }, e2 = { x: S.x + ux * along + uy * h, y: S.y + uy * along - ux * h };
+    const e = e1.y > e2.y ? e1 : e2; set(re, e.x, e.y); set(rw, S.x + dx, S.y + dy);
+  };
+  if (item === 'contact') {
+    if (!ok(P, rs, re, rw, 23, 24)) return null;
+    const hipX = (P[23].x + P[24].x) / 2, late = !(value > 0.12);
+    armTo(hipX + d * 0.3 * H, P[rw].y);
+    return { to: Q, parts: [[rs, re], [re, rw]], mark: { x: Q[rw].x, y: Q[rw].y },
+      cue: late ? L('ボールが体の横に来る前に、体の前(黄色の丸)でとらえる。', '공이 몸 옆에 오기 전에, 몸 앞(노란 원)에서 맞히기.') : L('腕が伸び切る前、少し引きつけた位置(黄色の丸)でとらえる。', '팔이 다 펴지기 전, 조금 끌어당긴 위치(노란 원)에서 맞히기.') };
+  }
+  if (item === 'finish') {
+    if (!ok(P, rs, re, rw)) return null;
+    const reach = len(P[rs], P[re]) + len(P[re], P[rw]);
+    armTo(P[rs].x + d * 0.45 * reach, P[rs].y - 0.7 * reach);
+    return { to: Q, parts: [[rs, re], [re, rw]], cue: L('打ったあとも止めずに、手が肩より上に来るまで振り抜く。', '친 뒤에도 멈추지 말고, 손이 어깨 위에 올 때까지 휘두르기.') };
+  }
+  if (item === 'weight') {
+    if (!ok(P, 11, 12, 23, 24)) return null;
+    const dx = d * 0.1 * H;
+    for (const j of [0, 2, 5, 7, 8, 11, 12, 13, 14, 15, 16, 23, 24]) if (Q[j]) Q[j].x += dx;
+    for (const j of [25, 26]) if (Q[j]) Q[j].x += dx * 0.5;
+    return { to: Q, parts: [[11, 23], [12, 24], [23, 25], [24, 26]], cue: L('打ちながら、腰ごと前足の上へ移動する。', '치면서 허리째로 앞발 위로 옮겨 가기.') };
+  }
   return null;
 }
 

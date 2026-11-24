@@ -38,6 +38,25 @@ export function makeCounter() {
     },
   };
 }
+// Stroke counter (forehand / backhand): one fast sideways sweep of the racket hand = one swing.
+export function makeSwingCounter(hand, aspect) {
+  const rw = hand === 'l' ? 15 : 16; let px = NaN, pt = 0, last = 0, count = 0, hot = 0;
+  return {
+    get count() { return count; },
+    feed(p, now) {
+      if (!p || !(p[rw] && p[rw].v >= 0.4 && p[0] && p[0].v >= 0.5 && p[27] && p[28])) { px = NaN; return false; }
+      const H = ((p[27].y + p[28].y) / 2 - p[0].y) * 1.08; if (!(H > 0.1)) { px = NaN; return false; }
+      const x = p[rw].x * aspect / H;                       // in body heights
+      let hit = false;
+      if (Number.isFinite(px) && now > pt) {
+        const v = Math.abs(x - px) / ((now - pt) / 1000);
+        hot = v > 2.2 ? hot + 1 : 0;                        // two fast readings in a row, then wait before counting again
+        if (hot >= 2 && now - last > 900) { last = now; count++; hit = true; }
+      }
+      px = x; pt = now; return hit;
+    },
+  };
+}
 // Is the whole body inside the guide, with room above the head for the toss?
 export function framing(p) {
   if (!p) return 'none';
@@ -49,7 +68,8 @@ export function framing(p) {
   return 'ok';
 }
 
-export async function openCamera({ onDone }) {
+export async function openCamera({ onDone, kind = 'serve', hand = 'r', name = '', unit = '' }) {
+  const isS = kind === 'serve', newCounter = () => isS ? makeCounter() : makeSwingCounter(hand, (v.videoWidth || 9) / (v.videoHeight || 16));
   const ov = document.createElement('div'); ov.className = 'camov';
   ov.innerHTML = `<div class="stage"><div class="flip" id="cFlip"><video id="cV" playsinline webkit-playsinline muted autoplay></video><canvas id="cC"></canvas></div>
     <div class="camtop"><button id="cX" aria-label="close">✕</button><div id="cMsg" class="cmsg"></div><button id="cSw" aria-label="switch">⟲</button></div>
@@ -57,7 +77,7 @@ export async function openCamera({ onDone }) {
     <div class="cambot"><div id="cHint" class="chint"></div><button id="cGo" class="btn ball"></button><button id="cUse" class="btn ball hide"></button><button id="cRe" class="btn ghost w hide"></button></div></div>`;
   document.body.appendChild(ov);
   const $ = s => ov.querySelector(s), v = $('#cV'), cv = $('#cC'), g = cv.getContext('2d');
-  let stream = null, facing = 'environment', raf = 0, state = 'frame', rec = null, chunks = [], blob = null, counter = makeCounter(), t0 = 0, stopAt = 0, lock = null, timer = 0, lastDet = 0, lastP = null, closed = false;
+  let stream = null, facing = 'environment', raf = 0, state = 'frame', rec = null, chunks = [], blob = null, counter = { count: 0, feed: () => false }, t0 = 0, stopAt = 0, lock = null, timer = 0, lastDet = 0, lastP = null, closed = false;
 
   const stopStream = () => { if (stream) stream.getTracks().forEach(t => t.stop()); stream = null; };
   const close = () => { closed = true; cancelAnimationFrame(raf); clearInterval(timer); try { if (rec && rec.state !== 'inactive') rec.stop(); } catch {} stopStream(); try { lock && lock.release(); } catch {} ov.remove(); };
@@ -77,13 +97,13 @@ export async function openCamera({ onDone }) {
     const go = $('#cGo'), use = $('#cUse'), re = $('#cRe'), cnt = $('#cCnt'), hint = $('#cHint');
     go.classList.toggle('hide', state === 'done' || state === 'count'); use.classList.toggle('hide', state !== 'done'); re.classList.toggle('hide', state !== 'done');
     $('#cSw').classList.toggle('hide', state !== 'frame'); cnt.classList.toggle('hide', state === 'frame');
-    if (state === 'frame') { go.textContent = L('● 撮影スタート(5秒後に開始)', '● 촬영 시작 (5초 뒤 시작)'); hint.textContent = L('スマホを真横に固定して、足を下の線に合わせて立ってください。サーブを3本打つと自動で止まります。', '폰을 바로 옆에 고정하고, 발을 아래 선에 맞춰 서 주세요. 서브를 3개 치면 자동으로 멈춰요.'); }
-    if (state === 'rec') { go.textContent = L('■ ここで終了する', '■ 여기서 끝내기'); hint.textContent = L('サーブを打ってください。音が鳴ったら1本カウントです。', '서브를 쳐 주세요. 소리가 나면 1개로 센 거예요.'); }
-    if (state === 'done') { use.textContent = L('この動画を分析する', '이 영상 분석하기'); re.textContent = L('撮り直す', '다시 찍기'); hint.textContent = counter.count ? L(`サーブを${counter.count}本撮れました。`, `서브 ${counter.count}개를 찍었어요.`) : L('サーブを数えられませんでした。このまま分析することもできます。', '서브를 세지 못했어요. 이대로 분석할 수도 있어요.'); }
+    if (state === 'frame') { go.textContent = L('● 撮影スタート(5秒後に開始)', '● 촬영 시작 (5초 뒤 시작)'); hint.textContent = L(`スマホを真横に固定して、足を下の線に合わせて立ってください。${name}を3${unit}打つと自動で止まります。`, `폰을 바로 옆에 고정하고, 발을 아래 선에 맞춰 서 주세요. ${name} 3${unit}를 치면 자동으로 멈춰요.`); }
+    if (state === 'rec') { go.textContent = L('■ ここで終了する', '■ 여기서 끝내기'); hint.textContent = L(`${name}を打ってください。音が鳴ったら1${unit}カウントです。`, `${name}를 쳐 주세요. 소리가 나면 1${unit}로 센 거예요.`); }
+    if (state === 'done') { use.textContent = L('この動画を分析する', '이 영상 분석하기'); re.textContent = L('撮り直す', '다시 찍기'); hint.textContent = counter.count ? L(`${name}を${counter.count}${unit}撮れました。`, `${name} ${counter.count}${unit}를 찍었어요.`) : L('数えられませんでしたが、このまま分析することもできます。', '세지는 못했지만, 이대로 분석할 수도 있어요.'); }
   }
   const showCount = () => { $('#cCnt').innerHTML = `<b>${Math.min(counter.count, TARGET)}</b><span>/ ${TARGET}</span>`; };
   function beginRec() {
-    const mime = pickMime(); chunks = []; blob = null; counter = makeCounter(); stopAt = 0;
+    const mime = pickMime(); chunks = []; blob = null; counter = newCounter(); stopAt = 0;
     try { rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 5e6 } : undefined); }
     catch { rec = new MediaRecorder(stream); }
     rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
@@ -125,7 +145,7 @@ export async function openCamera({ onDone }) {
       for (const [a, b] of EDGES) if (p[a].v >= .5 && p[b].v >= .5) { g.beginPath(); g.moveTo(p[a].x * W, p[a].y * H); g.lineTo(p[b].x * W, p[b].y * H); g.stroke(); }
     }
   }
-  const MSG = () => ({ none: L('人が映っていません', '사람이 보이지 않아요'), part: L('頭から足先まで入るように下がってください', '머리부터 발끝까지 나오게 물러나 주세요'), close: L('もう少し離れてください(頭の上にボールの空きが必要です)', '조금 더 떨어져 주세요 (머리 위에 공이 올라갈 공간이 필요해요)'), far: L('もう少し近づいてください', '조금 더 가까이 와 주세요'), ok: L('✓ この位置でOK', '✓ 이 위치면 좋아요') });
+  const MSG = () => ({ none: L('人が映っていません', '사람이 보이지 않아요'), part: L('頭から足先まで入るように下がってください', '머리부터 발끝까지 나오게 물러나 주세요'), close: isS ? L('もう少し離れてください(頭の上にボールの空きが必要です)', '조금 더 떨어져 주세요 (머리 위에 공이 올라갈 공간이 필요해요)') : L('もう少し離れてください', '조금 더 떨어져 주세요'), far: L('もう少し近づいてください', '조금 더 가까이 와 주세요'), ok: L('✓ この位置でOK', '✓ 이 위치면 좋아요') });
   function loop() {
     if (closed) return;
     raf = requestAnimationFrame(loop);

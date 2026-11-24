@@ -59,21 +59,22 @@ export const PRIORITY = ['tossPos', 'tossH', 'hold', 'elbow', 'knee'];
 export const LABEL = () => ({ good: L('良い', '좋아요'), mid: L('あと少し', '조금만 더'), warn: L('ここから', '여기부터'), na: L('今回は測れず', '이번엔 못 쟀어요') });
 export const CMP = () => ({ up: L('良くなった', '좋아졌어요'), same: L('ほぼ同じ', '거의 같아요'), keep: L('良い状態のまま', '좋은 상태 그대로'), down: L('前回より下がった', '지난번보다 내려갔어요') });
 
-export function judge(k, v, level) {
+export function judge(M, k, v, level) {
   if (!fin(v)) return 'na';
-  const it = ITEMS[k], [lo, hi] = it.band(level);
+  const it = M.items[k], [lo, hi] = it.band(level);
   if (v >= lo && v <= hi) return 'good';
   return v < it.warnLo(level) || v > it.warnHi(level) ? 'warn' : 'mid';
 }
-export function judgeAll(m, level) { const out = {}; for (const k of PRIORITY) out[k] = judge(k, m[k], level); return out; }
-// Order to fix things: "ここから" items first, then "あと少し", each in toss → arm → legs order.
-export const fixOrder = j => [...PRIORITY.filter(k => j[k] === 'warn'), ...PRIORITY.filter(k => j[k] === 'mid')];
-export const pickTask = j => fixOrder(j)[0] || 'keep';
+export function judgeAll(M, m, level) { const out = {}; for (const k of M.order) out[k] = judge(M, k, m[k], level); return out; }
+// Order to fix things: "ここから" items first, then "あと少し", each in the motion's own order.
+export const fixOrder = (M, j) => [...M.order.filter(k => j[k] === 'warn'), ...M.order.filter(k => j[k] === 'mid')];
+export const pickTask = (M, j) => fixOrder(M, j)[0] || 'keep';
 // Skeleton joints to highlight for an item, from the arms actually used in this video.
-export function jointsFor(k, side) {
-  const part = ITEMS[k] && ITEMS[k].part;
+export function jointsFor(M, k, side) {
+  const part = M.items[k] && M.items[k].part;
   if (part === 'toss') return [side.tossS, side.tossE, side.tossW];
   if (part === 'racket') return side.racket;
+  if (part === 'body') return [11, 12, 23, 24];
   return [23, 25, 27, 24, 26, 28];
 }
 
@@ -113,7 +114,8 @@ export const dayDiff = (a, b) => { const p = s => { const [y, m, d] = s.split('-
 
 // Schedule: today (day 0) through the same weekday next week (day 7). Stores drill indices only, so it renders in either language.
 // The re-film day is the last court day in days 1–7 (day 7 if there is none).
-export function makeSchedule(task, courtDays, start = new Date()) {
+export function makeSchedule(M, task, courtDays, start = new Date()) {
+  const DRILLS = M.drills;
   const days = [];
   for (let i = 0; i <= 7; i++) {
     const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
@@ -129,10 +131,10 @@ export const filmDay = days => days.find(d => d.film) || days[days.length - 1];
 export const wd = dow => WD()[dow];
 
 // Compare two sessions. Only the distance outside the "good" range counts, so changes inside the good range are never a step back.
-export function compare(now, prev, level) {
+export function compare(M, now, prev, level) {
   const rows = [];
-  for (const k of PRIORITY) {
-    const a = prev[k], b = now[k], it = ITEMS[k];
+  for (const k of M.order) {
+    const a = prev[k], b = now[k], it = M.items[k];
     if (!fin(a) || !fin(b)) continue;
     const [lo, hi] = it.band(level), out = v => v < lo ? lo - v : v > hi ? v - hi : 0;
     const gain = out(a) - out(b);
@@ -141,3 +143,78 @@ export function compare(now, prev, level) {
   }
   return rows;
 }
+
+// ---------- forehand / backhand (ground strokes, side view). All ranges are provisional pending coach review. ----------
+const strokeItems = bh => ({
+  contact: {
+    name: () => L('打点の位置', '공 맞는 위치'),
+    band: () => [0.12, 0.55], warnLo: () => 0.03, warnHi: () => 0.70,
+    fmt: v => v > 0.015 ? L(`体(腰)より身長の約${pc(v)}%ぶん前`, `몸(허리)보다 키의 약 ${pc(v)}%만큼 앞`) : L('体の真横か、それより後ろ', '몸 바로 옆이거나 그보다 뒤'),
+    ideal: () => L('目安：体より身長の12〜55%ぶん前', '기준: 몸보다 키의 12~55%만큼 앞'),
+    good: () => L('体の前でボールをとらえられています。', '몸 앞에서 공을 맞히고 있어요.'),
+    msg: v => v < 0.12 ? L('打点が体に近すぎる(遅れぎみ)です。もっと体の前でとらえましょう。', '공 맞는 위치가 몸에 너무 가까워요(늦는 편). 더 몸 앞에서 맞혀 보세요.')
+                       : L('打点が前すぎて、腕が伸び切っています。もう少し引きつけて打ちましょう。', '공 맞는 위치가 너무 앞이라 팔이 다 펴져요. 조금 더 끌어당겨서 쳐 보세요.'),
+    short: v => v < 0.12 ? L('もっと体の前で打つ', '더 몸 앞에서 치기') : L('ボールを少し引きつけて打つ', '공을 조금 더 끌어당겨 치기'),
+    mdc: 0.08, part: 'racket' },
+  weight: {
+    name: () => L('前への体重移動', '앞으로 체중 옮기기'),
+    band: () => [0.08, 9], warnLo: () => 0.0, warnHi: () => 9,
+    fmt: v => v > 0.015 ? L(`打ちながら身長の約${pc(v)}%ぶん前へ`, `치면서 키의 약 ${pc(v)}%만큼 앞으로`) : v < -0.015 ? L(`打ちながら身長の約${pc(-v)}%ぶん後ろへ`, `치면서 키의 약 ${pc(-v)}%만큼 뒤로`) : L('ほぼその場で打っています', '거의 제자리에서 치고 있어요'),
+    ideal: () => L('目安：打ちながら身長の8%以上、前へ', '기준: 치면서 키의 8% 이상 앞으로'),
+    good: () => L('打ちながら体が前に進んでいます。', '치면서 몸이 앞으로 나가고 있어요.'),
+    msg: v => v < 0 ? L('打つときに体が後ろへ下がっています。後ろ足から前足へ体重を移しながら打ちましょう。', '칠 때 몸이 뒤로 물러나요. 뒷발에서 앞발로 체중을 옮기면서 쳐 보세요.')
+                    : L('その場で腕だけで打ちぎみです。前足に体重を移しながら打ちましょう。', '제자리에서 팔로만 치는 편이에요. 앞발로 체중을 옮기면서 쳐 보세요.'),
+    short: () => L('前足に体重を移しながら打つ', '앞발로 체중을 옮기며 치기'),
+    mdc: 0.05, part: 'body' },
+  knee: {
+    name: () => L('ひざの曲げ', '무릎 굽히기'),
+    band: lv => [0, lv === 'mid' ? 140 : 150], warnLo: () => -1, warnHi: lv => lv === 'mid' ? 155 : 165,
+    fmt: v => Math.round(v) + '°',
+    ideal: lv => L(`目安：${lv === 'mid' ? '中級は140°' : '初級は150°'}以下`, `기준: ${lv === 'mid' ? '중급은 140°' : '초급은 150°'} 이하`),
+    good: () => L('打つ前にひざを曲げて、低い姿勢を作れています。', '치기 전에 무릎을 굽혀 낮은 자세를 만들고 있어요.'),
+    msg: () => L('ひざが伸びたまま打っています。ラケットを引くときにひざを曲げて、低く構えましょう。', '무릎이 펴진 채로 쳐요. 라켓을 뒤로 뺄 때 무릎을 굽혀 낮게 준비해 보세요.'),
+    short: () => L('ラケットを引くときにひざを曲げる', '라켓을 뺄 때 무릎 굽히기'),
+    mdc: 10, part: 'legs' },
+  finish: {
+    name: () => L('振り抜きの高さ', '끝까지 휘두르는 높이'),
+    band: () => [-0.1, 9], warnLo: () => -0.6, warnHi: () => 9,
+    fmt: v => v >= -0.1 ? L('肩の高さより上まで振れています', '어깨 높이 위까지 휘둘렀어요') : v > -0.6 ? L('胸のあたりで止まっています', '가슴 근처에서 멈췄어요') : L('腰のあたりで止まっています', '허리 근처에서 멈췄어요'),
+    ideal: () => L('目安：手が肩の高さより上まで', '기준: 손이 어깨 높이 위까지'),
+    good: () => L('最後まで高く振り抜けています。', '끝까지 높이 휘두르고 있어요.'),
+    msg: () => bh ? L('振りが途中で止まっています。打ったあと、手を肩より上まで大きく振り抜きましょう。', '스윙이 중간에 멈춰요. 친 뒤 손을 어깨 위까지 크게 휘둘러 보세요.')
+                  : L('振りが途中で止まっています。打ったあと、手を反対の肩の上まで振り抜きましょう。', '스윙이 중간에 멈춰요. 친 뒤 손을 반대쪽 어깨 위까지 휘둘러 보세요.'),
+    short: () => L('肩の上まで振り抜く', '어깨 위까지 끝까지 휘두르기'),
+    mdc: 0.25, part: 'racket' },
+});
+const strokeDrills = bh => ({
+  contact: [
+    D('打点で止まる素振り', '맞는 위치에서 멈추는 빈 스윙', '体の少し前(打点)でラケットを止め、位置を目で確認する。10回×2。', '몸 살짝 앞(공 맞는 위치)에서 라켓을 멈추고 위치를 눈으로 확인. 10회×2.', 'home', 5),
+    D('手出しボールを前でとらえる', '던져 준 공을 앞에서 맞히기', '近くからゆっくり出してもらったボールを、前足の横より前で打つ。10球×2。', '가까이서 천천히 던져 준 공을 앞발 옆보다 앞에서 치기. 10구×2.', 'court', 10),
+  ],
+  weight: [
+    D('踏み込み素振り', '내딛는 빈 스윙', '前足を一歩踏み込みながら素振り。打ち終わりに後ろ足のかかとが浮くまで。10回×2。', '앞발을 한 걸음 내디디며 빈 스윙. 끝났을 때 뒷발 뒤꿈치가 뜰 때까지. 10회×2.', 'home', 5),
+    D('踏み込んで打つ', '내디디며 치기', '手出しボールを、前足を踏み込みながら打つ。打ったあと前足1本で立てるか確認。10球×2。', '던져 준 공을 앞발을 내디디며 치기. 친 뒤 앞발 하나로 설 수 있는지 확인. 10구×2.', 'court', 10),
+  ],
+  knee: [
+    D('低い構えの素振り', '낮은 자세 빈 스윙', 'ラケットを引くと同時にひざを曲げ、伸び上がりながら振る。10回×2。', '라켓을 빼는 것과 동시에 무릎을 굽히고, 일어서면서 휘두르기. 10회×2.', 'home', 5),
+    D('低いボールを打つ', '낮은 공 치기', 'ひざの高さに出してもらったボールを、ひざを曲げて打つ(腰を折らない)。10球×2。', '무릎 높이로 던져 준 공을 무릎을 굽혀서 치기(허리를 숙이지 않기). 10구×2.', 'court', 10),
+  ],
+  finish: [
+    D('振り抜きで止まる素振り', '끝 자세에서 멈추는 빈 스윙', bh ? '最後に手が肩より上に来たところで2秒止まる。10回×2。' : '最後に手が反対の肩の上に来たところで2秒止まる。10回×2。', bh ? '마지막에 손이 어깨 위에 온 곳에서 2초 멈추기. 10회×2.' : '마지막에 손이 반대쪽 어깨 위에 온 곳에서 2초 멈추기. 10회×2.', 'home', 5),
+    D('ゆっくり大きく打つ', '천천히 크게 치기', '7割の力で、最後まで振り切ることだけ意識して打つ。10球×2。', '70% 힘으로, 끝까지 휘두르는 것만 생각하며 치기. 10구×2.', 'court', 10),
+  ],
+  keep: [
+    D('ゆっくり素振り', '천천히 빈 스윙', '同じ動きを半分の速さで素振り。5回。', '같은 동작을 절반 속도로 빈 스윙. 5회.', 'home', 5),
+    D('同じリズムで打つ', '같은 리듬으로 치기', '強く打たず、同じリズムでコートに入れるだけ。10球。', '세게 치지 않고, 같은 리듬으로 코트에 넣기만. 10구.', 'court', 10),
+  ],
+});
+
+export const MOTIONS = {
+  serve: { id: 'serve', name: () => L('サーブ', '서브'), unit: () => L('本', '개'), items: ITEMS, order: PRIORITY, drills: DRILLS,
+    orderNote: () => L('サーブは前の動きが崩れると後ろも崩れるので、トス → 腕 → 脚の順に直します。', '서브는 앞 동작이 흔들리면 뒤도 흔들려서, 토스 → 팔 → 다리 순서로 고쳐요.') },
+  forehand: { id: 'forehand', name: () => L('フォアハンド', '포핸드'), unit: () => L('回', '회'), items: strokeItems(false), order: ['contact', 'weight', 'knee', 'finish'], drills: strokeDrills(false),
+    orderNote: () => L('打点 → 体重移動 → ひざ → 振り抜きの順に、1つずつ直します。', '공 맞는 위치 → 체중 이동 → 무릎 → 끝까지 휘두르기 순서로 하나씩 고쳐요.') },
+  backhand: { id: 'backhand', name: () => L('バックハンド', '백핸드'), unit: () => L('回', '회'), items: strokeItems(true), order: ['contact', 'weight', 'knee', 'finish'], drills: strokeDrills(true),
+    orderNote: () => L('打点 → 体重移動 → ひざ → 振り抜きの順に、1つずつ直します。', '공 맞는 위치 → 체중 이동 → 무릎 → 끝까지 휘두르기 순서로 하나씩 고쳐요.') },
+};
+export const motionOf = s => MOTIONS[(s && s.motion) || 'serve'] || MOTIONS.serve;
