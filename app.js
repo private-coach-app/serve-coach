@@ -46,8 +46,8 @@ function navLabels() {
   const t = { home: L('ホーム', '홈'), capture: L('撮る・分析', '촬영·분석'), history: L('記録', '기록'), setup: L('プロフィール', '내 정보') };
   document.querySelectorAll('nav button').forEach(b => b.querySelector('span').textContent = t[b.dataset.go]);
   $('#langbtn').textContent = lang === 'ja' ? '🌐 한국어' : '🌐 日本語';
-  document.title = L('サーブコーチ', '서브 코치');
-  $('#brand').textContent = L('サーブコーチ', '서브 코치');
+  document.title = 'Be My Coach';
+  $('#brand').textContent = 'Be My Coach';
 }
 async function go(r, arg) {
   curRoute = r; curArg = arg; stopAll();
@@ -363,7 +363,7 @@ async function shareCard(s, prev) {
   const h = 1400, iw = h * 9 / 16, x0 = (1080 - iw) / 2;
   g.save(); g.beginPath(); g.roundRect(x0, 190, iw, h, 36); g.clip(); g.drawImage(im, x0, 190, iw, h); g.restore();
   g.fillStyle = '#D9E43A'; g.beginPath(); g.arc(110, 105, 26, 0, 7); g.fill();
-  g.fillStyle = '#fff'; g.font = `900 54px ${FONT}`; g.fillText(L('サーブコーチ', '서브 코치') + ' · ' + motionOf(s).name(), 156, 124);
+  g.fillStyle = '#fff'; g.font = `900 54px ${FONT}`; g.fillText('Be My Coach' + ' · ' + motionOf(s).name(), 156, 124);
   g.font = `500 34px ${FONT}`; g.fillStyle = 'rgba(255,255,255,.7)'; g.textAlign = 'right'; g.fillText(md(s.date), 990, 120); g.textAlign = 'center';
   const M = motionOf(s), ITEMS = M.items, up = prev ? compare(M, s.metrics, prev.metrics, s.level).find(r => r.res === 'up') : null;
   g.fillStyle = '#D9E43A'; g.font = `900 58px ${FONT}`;

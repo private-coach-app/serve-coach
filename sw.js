@@ -1,5 +1,5 @@
 // Cache app shell + model so the app works offline after first load.
-const C = 'serve-coach-v0-8';
+const C = 'serve-coach-v0-9';
 const FILES = ['./', 'index.html', 'app.js', 'engine.js', 'rules.js', 'i18n.js', 'ideal.js', 'fix.js', 'cam.js', 'vision_bundle.mjs', 'wasm/vision_wasm_internal.js', 'manifest.webmanifest', 'icon-192.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(C).then(c => c.addAll(FILES))); self.skipWaiting(); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== C).map(k => caches.delete(k))))); self.clients.claim(); });
