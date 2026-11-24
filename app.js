@@ -2,6 +2,7 @@ import * as E from './engine.js';
 import { L, lang, setLang, WD } from './i18n.js';
 import { PHASES, animateIdeal } from './ideal.js';
 import { correct, playFix } from './fix.js';
+import { openCamera, cameraSupported } from './cam.js';
 import { ITEMS, PRIORITY, LABEL, CMP, DRILLS, WARMUP, RULES_V, fin, judgeAll, fixOrder, pickTask, jointsFor, makeSchedule, filmDay, compare, wd, ymd, dayDiff } from './rules.js';
 
 const $ = s => document.querySelector(s);
@@ -138,14 +139,16 @@ async function capture() {
   <ol class="howto"><li>${L('<b>真横</b>から撮る(ベースラインの延長線上にスマホ)', '<b>바로 옆</b>에서 찍기 (베이스라인 연장선에 폰)')}</li>
   <li>${L('スマホは<b>縦向き</b>、腰の高さで固定', '폰은 <b>세로</b>, 허리 높이에 고정')}</li>
   <li>${L('頭の上のボールから足先まで、<b>全身</b>を入れる', '머리 위 공부터 발끝까지 <b>온몸</b>이 나오게')}</li>
-  <li>${L('<b>ふつうの動画</b>で撮る(スローモーションは使えません)', '<b>일반 동영상</b>으로 찍기 (슬로모션은 쓸 수 없어요)')}</li>
+  <li>${L('自分のカメラアプリで撮るときは<b>ふつうの動画</b>で(スローモーションは使えません)', '폰 카메라 앱으로 찍을 땐 <b>일반 동영상</b>으로 (슬로모션은 쓸 수 없어요)')}</li>
   <li>${L('サーブを<b>3〜5本</b>', '서브 <b>3~5개</b>')}</li></ol></div>
   <input type="file" id="file" accept="video/*" class="hide">
-  <button class="btn ball" id="pick">${L('動画を選ぶ / 撮影する', '영상 고르기 / 촬영하기')}</button>
+  ${cameraSupported() ? `<button class="btn ball" id="camb">${L('📷 ガイド付きカメラで撮る', '📷 가이드 카메라로 찍기')}</button><p class="sub c">${L('立つ位置のガイドが出て、サーブを3本数えて自動で止まります。', '서는 위치 가이드가 나오고, 서브 3개를 세면 자동으로 멈춰요.')}</p>` : ''}
+  <button class="btn ${cameraSupported() ? 'ghost' : 'ball'}" id="pick">${L('撮ってある動画を選ぶ', '찍어 둔 영상 고르기')}</button>
   <p class="sub c">🔒 ${L('動画はこのスマホの中だけで分析します。どこにも送信されません。', '영상은 이 폰 안에서만 분석해요. 어디로도 전송되지 않아요.')}</p>
   <div id="eng" class="card"><b id="et"></b><div class="bar"><i id="eb"></i></div><div class="msg" id="es"></div><button class="btn ghost hide" id="retry">${L('もう一度試す', '다시 시도')}</button></div>
   <div id="prog" class="card hide"><b id="pt"></b><div class="bar"><i id="pb"></i></div><div class="msg" id="ps"></div></div>`;
   $('#pick').onclick = () => $('#file').click();
+  const cb = $('#camb'); if (cb) cb.onclick = () => openCamera({ onDone: blob => { if (curRoute !== 'capture' || !blob) return; if (work && work.video) { URL.revokeObjectURL(work.video.src); work.video.remove(); work = null; } analyse(E.makeVideo(blob)); } });
   bindEngineCard();
   // the video element must be created inside this tap handler (iOS)
   $('#file').onchange = e => { const f = e.target.files[0]; if (!f) return; if (work && work.video) { URL.revokeObjectURL(work.video.src); work.video.remove(); work = null; } analyse(E.makeVideo(f)); };
@@ -175,7 +178,7 @@ function bindEngineCard() {
 }
 async function analyse(vEl) {
   const pb = $('#pb'), pt = $('#pt'), ps = $('#ps');
-  $('#prog').classList.remove('hide'); $('#pick').disabled = true;
+  $('#prog').classList.remove('hide'); $('#pick').disabled = true; if ($('#camb')) $('#camb').disabled = true; $('#prog').scrollIntoView({ block: 'center' });
   const wait = L('このままお待ちください(30秒〜2分)。画面を閉じないでください。', '이대로 기다려 주세요(30초~2분). 화면을 닫지 마세요.');
   try {
     pt.textContent = E.engineState.phase === 'ready' ? L('分析を始めます…', '분석을 시작해요…') : L('準備ができ次第、分析を始めます…', '준비가 끝나면 바로 분석을 시작해요…');
@@ -193,7 +196,7 @@ async function analyse(vEl) {
     go('mark');
   } catch (e) { failBox(L('分析できませんでした：', '분석하지 못했어요: ') + e.message); console.error(e); }
 }
-function failBox(t) { const b = $('#pick'); if (b) b.disabled = false; const pt = $('#pt'); if (pt) { pt.textContent = L('分析できませんでした', '분석하지 못했어요'); $('#ps').textContent = ''; } alertBox(t); }
+function failBox(t) { const b = $('#pick'); if (b) b.disabled = false; if ($('#camb')) $('#camb').disabled = false; const pt = $('#pt'); if (pt) { pt.textContent = L('分析できませんでした', '분석하지 못했어요'); $('#ps').textContent = ''; } alertBox(t); }
 
 // ---------- mark (serve confirmation) ----------
 async function frameAt(i, w, hl, after, noSkel) {

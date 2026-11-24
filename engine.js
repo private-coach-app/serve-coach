@@ -106,7 +106,20 @@ export async function openVideo(v, timeoutMs = 20000) {
     setTimeout(() => { if (!done) { done = true; rej(new Error(L('動画の読み込みが止まりました。別の動画で試すか、ページを再読み込みしてください。', '영상 불러오기가 멈췄어요. 다른 영상으로 해 보거나 페이지를 새로고침해 주세요.'))); } }, timeoutMs);
   });
   v.pause();
+  // recordings made in the browser can report an unknown length: jumping far ahead makes the browser work it out
+  if (!Number.isFinite(v.duration)) {
+    await new Promise(res => { const fin = () => { v.removeEventListener('durationchange', chk); res(); }, chk = () => { if (Number.isFinite(v.duration)) fin(); }; v.addEventListener('durationchange', chk); v.currentTime = 1e7; setTimeout(fin, 4000); });
+    await seek(v, 0);
+  }
+  if (!Number.isFinite(v.duration) || !(v.duration > 0)) throw new Error(L('動画の長さを読み取れませんでした。「動画を選ぶ」から撮影した動画でお試しください。', '영상 길이를 읽지 못했어요. 「영상 고르기」로 찍은 영상으로 해 보세요.'));
   return v;
+}
+
+// Live camera frame → landmarks in 0..1 picture coordinates (shares the timestamp clock with the offline analysis).
+export function detectLive(video) {
+  if (!landmarker || !video.videoWidth) return null;
+  TS = Math.max(TS + 1, Math.round(performance.now()));
+  try { const r = landmarker.detectForVideo(video, TS); return r.landmarks && r.landmarks[0] ? r.landmarks[0].map(q => ({ x: q.x, y: q.y, v: q.visibility ?? 1 })) : null; } catch { return null; }
 }
 
 // Run pose on every frame. Returns per-frame landmark arrays (pixel coords + visibility).
