@@ -221,7 +221,7 @@ export function drawFrame(canvas, video, p, opts = {}) {
   canvas.width = cw; canvas.height = ch;
   const c = canvas.getContext('2d');
   c.drawImage(video, sx, sy, sw, sh, 0, 0, cw, ch);
-  if (!p) return canvas;
+  if (!p || opts.noSkel) { if (p && opts.after) { const k0 = cw / sw; opts.after(c, q => [(q.x - sx) * k0, (q.y - sy) * k0], k0); } return canvas; }
   const k = cw / sw, tx = q => (q.x - sx) * k, ty = q => (q.y - sy) * k, lw = Math.max(3, cw / 110);
   c.lineCap = 'round';
   for (const [a, b] of EDGES) if (vis(p, a) && vis(p, b)) {

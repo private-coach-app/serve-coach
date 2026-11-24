@@ -1,6 +1,7 @@
 import * as E from './engine.js';
 import { L, lang, setLang, WD } from './i18n.js';
 import { PHASES, phaseAngles, overlayTrophy, animateIdeal } from './ideal.js';
+import { correct, playFix } from './fix.js';
 import { ITEMS, PRIORITY, LABEL, DRILLS, WARMUP, judgeAll, pickTask, makeSchedule, compare, CMP, wd } from './rules.js';
 
 const $ = s => document.querySelector(s);
@@ -179,7 +180,7 @@ async function analyse(vEl) {
 function failBox(t) { $('#pick').disabled = false; $('#pt').textContent = L('分析できませんでした', '분석하지 못했어요'); alertBox(t); }
 
 // ---------- mark (serve confirmation) ----------
-async function frameAt(i, w, crop = true, hl, after) { await E.seek(work.video, Math.min(work.video.duration - 0.001, (i + 0.5) / FPS)); await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); return E.drawFrame(document.createElement('canvas'), work.video, work.tr.frames[i], { crop, w, h: w * 16 / 9, highlight: hl, after }); }
+async function frameAt(i, w, crop = true, hl, after, noSkel) { await E.seek(work.video, Math.min(work.video.duration - 0.001, (i + 0.5) / FPS)); await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); return E.drawFrame(document.createElement('canvas'), work.video, work.tr.frames[i], { crop, w, h: w * 16 / 9, highlight: hl, after, noSkel }); }
 async function mark() {
   if (!work) return go('capture');
   app.innerHTML = `<h1>${L(`サーブを${work.serves.length}本見つけました`, `서브 ${work.serves.length}개를 찾았어요`)}</h1><p class="sub">${L('トロフィーの姿勢(膝が一番曲がった瞬間)です。間違って拾われたものはタップして外してください。', '트로피 자세(무릎이 가장 굽은 순간)입니다. 잘못 잡힌 건 눌러서 빼 주세요.')}</p>
@@ -218,10 +219,14 @@ async function buildSession() {
   const view = work.ctx.view;
   const after = view === 'side' ? (c, T, k) => { const p = work.tr.frames[rep.tro]; if (!p) return; const hip = T({ x: (p[23].x + p[24].x) / 2, y: (p[23].y + p[24].y) / 2 }); overlayTrophy(c, hip, work.ctx.bodyH * k, rep.dir); } : null;
   const img = (await frameAt(rep.tro, 540, true, hl, after)).toDataURL('image/jpeg', 0.82);
+  // clean photo + landmark positions in its pixels, for the "how to fix" morph
+  let fixPts = null;
+  const clean = (await frameAt(rep.tro, 360, true, null, (c, T) => { const p = work.tr.frames[rep.tro]; fixPts = p.map(q => { const [x, y] = T(q); return { x: +x.toFixed(1), y: +y.toFixed(1), v: +q.v.toFixed(2) }; }); }, true)).toDataURL('image/jpeg', 0.8);
+  const fixData = { img: clean, pts: fixPts, dir: rep.dir, tossW: work.ctx.tossW, racket: work.ctx.racket };
   const pf = E.phaseFrames(work.tr, rep);
   const phases = [];
   for (const f of pf) phases.push({ img: (await frameAt(f, 240, true)).toDataURL('image/jpeg', 0.7), ...E.anglesAt(work.tr, work.ctx, f) });
-  const s = { id: Date.now(), date: new Date().toISOString().slice(0, 10), level: profile.level, n: used.length, metrics, judge: j, task, repeat, img, view, phases, prevId: prev ? prev.id : null, schedule: makeSchedule(task, profile.court) };
+  const s = { id: Date.now(), date: new Date().toISOString().slice(0, 10), level: profile.level, n: used.length, metrics, judge: j, task, repeat, img, view, phases, fix: fixData, prevId: prev ? prev.id : null, schedule: makeSchedule(task, profile.court) };
   await S.add(s);
   go('view', s.id);
 }
@@ -242,6 +247,7 @@ async function view(id) {
   <img class="frame" src="${s.img}" alt=""><p class="sub" style="margin-top:6px">${L('緑 = あなたの姿勢', '초록 = 내 자세')}${s.task !== 'keep' ? L(' · オレンジ = 今週の課題の部位', ' · 주황 = 이번 주 과제 부위') : ''}${s.view === 'side' ? L(' · 青の点線 = 理想のトロフィー姿勢(腰の位置と体格に合わせて表示)', ' · 파란 점선 = 이상적인 트로피 자세(허리 위치·체격에 맞춤)') : ''}</p>
   ${s.view && s.view !== 'side' ? `<div class="warnbox">${L('この動画は正面または斜めから撮影されたようです。判定は横からの撮影を前提にしているため、今回の数値は参考程度にしてください。理想ライン(青)も表示していません。', '이 영상은 정면이나 비스듬한 각도에서 찍힌 것 같아요. 판정은 옆 촬영을 기준으로 하므로 이번 수치는 참고만 해 주세요. 이상적인 선(파랑)도 표시하지 않았어요.')}</div>` : ''}
   ${priorityHtml(s)}
+  ${fixHtml(s)}
   ${prev ? cmpHtml(s, prev) : ''}
   <h2>${L('良い点', '좋은 점')}</h2><div class="card">${goods.length ? goods.map(k => `<div class="item"><div><span class="tag good">${LB.good}</span> <b>${ITEMS[k].name()}</b><div class="msg">${ITEMS[k].good()}</div></div></div>`).join('') : `<div class="msg">${L('まだ基準を超えた項目はありません。課題を1つずつ直していきましょう。', '아직 기준을 넘은 항목이 없어요. 과제 하나씩 바꿔 가면 됩니다.')}</div>`}</div>
   <h2>${L('今週の課題', '이번 주 과제')}</h2>
@@ -258,6 +264,7 @@ async function view(id) {
   <button class="btn ghost" id="hm">${L('ホームへ', '홈으로')}</button>`;
   bindChecks(s.id, done);
   startFlow(s);
+  startFixes(s);
   $('#hm').onclick = () => go('home');
   $('#mk').onclick = async () => { const url = await shareCard(s, prev); $('#share').innerHTML = `<img class="frame" src="${url}" style="max-width:300px;margin:0 auto"><p class="sub" style="text-align:center;margin-top:6px">${L('画像を長押しして保存してください', '이미지를 길게 눌러 저장하세요')}</p>`; };
 }
@@ -268,7 +275,25 @@ function priorityHtml(s) {
   return `<h2>${L('改善の優先順位', '개선 우선순위')}</h2><div class="card"><ol class="prio">${list.map((k, i) => `<li><div><b>${ITEMS[k].name()}</b> <span class="tag ${s.judge[k]}">${LB[s.judge[k]]}</span>${k === s.task ? ` <span class="tag now">${L('今週の課題', '이번 주 과제')}</span>` : ''}</div><div class="msg">${esc(ITEMS[k].warn(s.metrics[k]))}</div></li>`).join('')}</ol>
   <div class="msg">${L('サーブは前の動作が崩れると後ろも崩れるため、トス→腕→脚の順に1つずつ直します。', '서브는 앞 동작이 흔들리면 뒤도 흔들려서, 토스 → 팔 → 다리 순서로 하나씩 고쳐요.')}</div></div>`;
 }
-let stopFlow = null, flipTimer = null;
+let stopFlow = null, flipTimer = null, stopFixes = [];
+function fixItems(s) {
+  if (!s.fix || !s.fix.pts) return [];
+  const list = [...PRIORITY.filter(k => s.judge[k] === 'warn'), ...PRIORITY.filter(k => s.judge[k] === 'mid')].slice(0, 3);
+  return list.map(k => ({ k, f: correct(k, s.fix.pts, s.fix.dir || 1, s.level, s.fix) })).filter(x => x.f);
+}
+function fixHtml(s) {
+  const items = fixItems(s); if (!items.length) return '';
+  return `<h2>${L('直し方(あなたのフォームで)', '고치는 법 (내 자세로)')}</h2>
+  <p class="sub">${L('オレンジの点線 = 今、青 = 直した形。動きを繰り返し表示します。', '주황 점선 = 지금, 파랑 = 고친 모양. 움직임을 반복해서 보여줘요.')}</p>
+  ${s.view && s.view !== 'side' ? `<div class="msg">${L('※横から撮った動画のほうが正確に表示できます。', '※옆에서 찍은 영상이어야 더 정확하게 보여줄 수 있어요.')}</div>` : ''}
+  <div class="fixes">${items.map((x, i) => `<div class="card fixc"><canvas data-fix="${i}" width="360" height="640"></canvas>
+  <div><b>${i + 1}. ${ITEMS[x.k].name()}</b> <span class="msg">${ITEMS[x.k].fmt(s.metrics[x.k])}${x.f.target ? ' → ' + L('目標 ', '목표 ') + x.f.target + '°' : ''}</span><div class="msg">${esc(x.f.cue)}</div></div></div>`).join('')}</div>`;
+}
+function startFixes(s) {
+  stopFixes.forEach(f => f()); stopFixes = [];
+  const items = fixItems(s); if (!items.length) return;
+  const img = new Image(); img.onload = () => items.forEach((x, i) => { const cv = document.querySelector(`canvas[data-fix="${i}"]`); if (cv) stopFixes.push(playFix(cv, img, s.fix.pts, x.f)); }); img.src = s.fix.img;
+}
 function flowHtml(s) {
   const fmt = v => isFinite(v) ? Math.round(v) + '°' : '—';
   const rows = PHASES.map((ph, i) => { const a = phaseAngles(ph), u = (s.phases || [])[i] || {};
