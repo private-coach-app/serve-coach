@@ -126,81 +126,96 @@ export async function trackPose(video, fps, onProgress) {
   return { frames, n, W, H, fps, dur, detectRate: n ? found / n : 0 };
 }
 
-// Serve detection (v2 rules) + per-serve metrics.
-export function findServes(t) {
+// Serve detection (v3) + per-serve metrics.
+// hand: 'r' | 'l' from the profile (toss arm = the other arm). Times are video time, so slow-motion clips are flagged.
+const len2 = (p, a, b) => Math.hypot(p[a].x - p[b].x, p[a].y - p[b].y);
+const pct = (a, q) => { const s = a.filter(Number.isFinite).sort((x, y) => x - y); return s.length ? s[Math.min(s.length - 1, Math.floor(s.length * q))] : NaN; };
+export function findServes(t, hand = 'r') {
   const { frames, n, fps } = t;
   const leg = (p, h, k, a) => p && vis(p, h, .6) && vis(p, k, .6) && vis(p, a, .6) ? ang(p, h, k, a) : NaN;
+  // knee: mean of both legs, drop only wild values (>25° off a 9-frame median), light 3-frame median so a fast bend keeps its bottom
   let knee = frames.map(p => { const l = leg(p, 23, 25, 27), r = leg(p, 24, 26, 28); return isNaN(l) ? r : isNaN(r) ? l : (l + r) / 2; });
-  const med = rollMed(knee, 9); knee = knee.map((v, i) => Math.abs(v - med[i]) > 15 ? NaN : v); knee = rollMed(knee, 5);
+  const med9 = rollMed(knee, 9); knee = knee.map((v, i) => Math.abs(v - med9[i]) > 25 ? NaN : v); knee = rollMed(knee, 3);
   const shY = frames.map(p => p ? (p[11].y + p[12].y) / 2 : NaN), hipY = frames.map(p => p ? (p[23].y + p[24].y) / 2 : NaN);
   const torso = median(frames.map((p, i) => hipY[i] - shY[i]));
   const bodyH = median(frames.map(p => p && vis(p, 0) && vis(p, 27) && vis(p, 28) ? ((p[27].y + p[28].y) / 2 - p[0].y) * 1.08 : NaN));
   const wh = w => frames.map((p, i) => p && vis(p, w) ? (shY[i] - p[w].y) / torso : NaN);
   const lw = wh(15), rw = wh(16);
   const cnt = a => a.filter(v => v > 0.3).length;
-  const leftToss = cnt(lw) >= cnt(rw);
-  const th = leftToss ? lw : rw, tossW = leftToss ? 15 : 16;
+  // toss arm: the profile decides; the video overrules it only when the other arm is clearly up far more often
+  let leftToss = hand !== 'l', swapped = false;
+  const cT = cnt(leftToss ? lw : rw), cO = cnt(leftToss ? rw : lw);
+  if (cO >= 2 * Math.max(cT, 3)) { leftToss = !leftToss; swapped = true; }
+  const th = leftToss ? lw : rw, tossW = leftToss ? 15 : 16, tossS = leftToss ? 11 : 12, tossE = leftToss ? 13 : 14;
   const racket = leftToss ? [12, 14, 16] : [11, 13, 15];
+  const armLen = pct(frames.map(p => p && vis(p, tossS) && vis(p, tossE) && vis(p, tossW) ? len2(p, tossS, tossE) + len2(p, tossE, tossW) : NaN), 0.9);
   const high = th.map(v => v > 0.3);
+  const gap = Math.max(1, Math.round(0.15 * fps)), minLen = 0.2 * fps;
   const serves = [];
   for (let i = 0; i < n; i++) {
     if (!high[i]) continue;
-    let j = i; while (j + 1 < n && (high[j + 1] || (j + 2 < n && high[j + 2]))) j++;
-    if ((j - i) / fps >= 0.3) {
+    let j = i;
+    for (;;) { let k = 0; for (let g = 1; g <= gap && j + g < n; g++) if (high[j + g]) k = g; if (!k) break; j += k; }
+    if (j - i >= minLen) {
       let tro = -1, km = Infinity, peakF = i, peak = -9;
       for (let f = i; f <= j; f++) if (th[f] > peak) { peak = th[f]; peakF = f; }
       // trophy = deepest knee while the toss arm is up (from just before the toss peak to the end of the toss)
       for (let f = Math.max(i, peakF - Math.round(0.25 * fps)); f <= j; f++) if (knee[f] < km) { km = knee[f]; tro = f; }
       if (tro < 0) tro = peakF;
-      serves.push({ toss: i, end: j, tro, peakF });
+      // near-top time: how long the toss hand stays within 80% of its highest point
+      let a = peakF, b = peakF; while (a > i && th[a - 1] >= 0.8 * peak) a--; while (b < j && (th[b + 1] >= 0.8 * peak || (b + 2 <= j && th[b + 2] >= 0.8 * peak))) b++;
+      serves.push({ toss: i, end: j, tro, peakF, top: (b - a + 1) / fps });
     }
     i = j;
   }
+  // slow-motion clips stretch every duration: a toss arm that stays up > 2.5 s (video time) is not real time
+  const slow = median(serves.map(s => (s.end - s.toss) / fps)) > 2.5;
   const ratio = median(frames.map((p, i) => p && vis(p, 11) && vis(p, 12) ? Math.abs(p[11].x - p[12].x) / torso : NaN));
-  const view = ratio < 0.45 ? 'side' : ratio < 0.75 ? 'oblique' : 'front';
-  const ctx = { knee, bodyH, tossW, racket, leftToss, torso, view, ratio };
+  // hitting direction, once per video: hips travel forward after each serve + the face points forward at the toss peak
+  let vote = 0; const B = bodyH || 1;
+  for (const s of serves) {
+    const p = frames[s.tro], pe = frames[Math.min(n - 1, s.end + Math.round(0.6 * fps))], pk = frames[s.peakF];
+    if (p && pe && vis(p, 23) && vis(p, 24) && vis(pe, 23) && vis(pe, 24)) { const d = ((pe[23].x + pe[24].x) - (p[23].x + p[24].x)) / 2 / B; if (Math.abs(d) > 0.03) vote += Math.sign(d); }
+    if (pk && vis(pk, 0) && vis(pk, 7) && vis(pk, 8)) { const d = (pk[0].x - (pk[7].x + pk[8].x) / 2) / B; if (Math.abs(d) > 0.01) vote += Math.sign(d) * 0.8; }
+  }
+  let dirSure = vote !== 0;
+  if (!dirSure) for (const s of serves) { const pk = frames[s.peakF]; if (pk && vis(pk, tossW) && vis(pk, 11) && vis(pk, 12)) vote += Math.sign(pk[tossW].x - (pk[11].x + pk[12].x) / 2); }
+  const dir = Math.sign(vote) || 1;
+  // side-view check: seen from the side the hips move clearly across the picture after the hit
+  const travel = median(serves.map(s => { const p = frames[s.tro], pe = frames[Math.min(n - 1, s.end + Math.round(0.6 * fps))]; return p && pe ? Math.abs((pe[23].x + pe[24].x) - (p[23].x + p[24].x)) / 2 / B : NaN; }));
+  const view = dirSure && !(travel < 0.04) ? 'side' : 'unsure';
+  const ctx = { knee, bodyH, tossW, tossS, tossE, racket, leftToss, swapped, torso, armLen, view, ratio, dir, dirSure, slow };
   serves.forEach(s => Object.assign(s, measure(t, ctx, s)));
   return { serves, ctx, knee, view };
 }
 
 export function measure(t, ctx, s) {
-  const { frames, fps } = t;
-  const p = frames[s.tro], pk = frames[s.peakF];
-  const knee = ctx.knee[s.tro];
+  const { frames } = t;
+  const p = frames[s.tro], pk = frames[s.peakF], dir = ctx.dir;
+  // trophy knee: lowest value within ±1 frame of the chosen frame (already lightly smoothed)
+  const kn = [ctx.knee[s.tro - 1], ctx.knee[s.tro], ctx.knee[s.tro + 1]].filter(Number.isFinite);
+  const knee = kn.length ? Math.min(...kn) : NaN;
   const elbow = p && ctx.racket.every(q => vis(p, q)) ? ang(p, ...ctx.racket) : NaN;
-  const ank = pk && vis(pk, 27) && vis(pk, 28) ? (pk[27].y + pk[28].y) / 2 : NaN;
-  const tossH = pk && vis(pk, ctx.tossW) ? (ank - pk[ctx.tossW].y) / ctx.bodyH : NaN;
-  // toss position: wrist x at peak vs front foot, along hitting direction (+ = in front)
-  let tossPos = NaN, dir = 0;
-  const pe = frames[Math.min(frames.length - 1, s.end + Math.round(0.6 * fps))];
-  // hitting direction: vote of (a) hip travel after the serve, (b) toss hand vs shoulders at the peak, (c) nose vs ears at the peak
-  let vote = 0; const B = ctx.bodyH || 1;
-  if (p && pe && vis(p, 23) && vis(p, 24) && vis(pe, 23) && vis(pe, 24)) { const d = ((pe[23].x + pe[24].x) - (p[23].x + p[24].x)) / 2 / B; if (Math.abs(d) > 0.03) vote += Math.sign(d) * 1.0; }
-  if (pk && vis(pk, ctx.tossW) && vis(pk, 11) && vis(pk, 12)) { const d = (pk[ctx.tossW].x - (pk[11].x + pk[12].x) / 2) / B; if (Math.abs(d) > 0.02) vote += Math.sign(d) * 1.2; }
-  if (pk && vis(pk, 0) && vis(pk, 7) && vis(pk, 8)) { const d = (pk[0].x - (pk[7].x + pk[8].x) / 2) / B; if (Math.abs(d) > 0.01) vote += Math.sign(d) * 0.8; }
-  dir = Math.sign(vote);
-  if (dir && pk && vis(pk, ctx.tossW) && vis(pk, 27) && vis(pk, 28)) {
+  // toss reach: how far above the shoulder the toss hand gets, as a share of the arm's length (1 = straight up)
+  const tossH = pk && vis(pk, ctx.tossW) && vis(pk, ctx.tossS) && ctx.armLen > 0 ? Math.min(1, (pk[ctx.tossS].y - pk[ctx.tossW].y) / ctx.armLen) : NaN;
+  // toss position: toss hand at its highest point vs the front ankle, along the hitting direction (+ = in front), in body heights
+  let tossPos = NaN;
+  if (ctx.dirSure && pk && vis(pk, ctx.tossW) && vis(pk, 27, 0.3) && vis(pk, 28, 0.3) && ctx.bodyH > 0) {
     const front = dir > 0 ? Math.max(pk[27].x, pk[28].x) : Math.min(pk[27].x, pk[28].x);
     tossPos = (pk[ctx.tossW].x - front) * dir / ctx.bodyH;
   }
-  return { knee: isFinite(knee) ? knee : NaN, elbow, tossH, tossPos, hold: (s.end - s.toss) / fps, dir: dir || 1 };
+  const hold = ctx.slow ? NaN : s.top;
+  return { knee, elbow, tossH, tossPos, hold, dir };
 }
 
 // Approximate frames for the six phases of one serve (ready, release, trophy, racket drop, impact, follow-through).
-export function phaseFrames(t, s) {
+export function phaseFrames(t, ctx, s) {
   const f = t.fps, n = t.n - 1, cl = x => Math.max(0, Math.min(n, Math.round(x)));
-  const imp = cl(s.end + 0.05 * f);
-  return [cl(s.toss - 0.35 * f), cl(s.toss), s.tro, cl((s.tro + imp) / 2), imp, cl(imp + 0.45 * f)];
-}
-// User's angles at a frame, comparable with the ideal model.
-export function anglesAt(t, ctx, i) {
-  const p = t.frames[i]; if (!p) return {};
-  const lk = vis(p, 23) && vis(p, 25) && vis(p, 27) ? ang(p, 23, 25, 27) : NaN, rk = vis(p, 24) && vis(p, 26) && vis(p, 28) ? ang(p, 24, 26, 28) : NaN;
-  const knee = isNaN(lk) ? rk : isNaN(rk) ? lk : Math.min(lk, rk);
-  const elbow = ctx.racket.every(q => vis(p, q)) ? ang(p, ...ctx.racket) : NaN;
-  const sIdx = ctx.tossW === 15 ? 11 : 12;
-  const toss = vis(p, sIdx) && vis(p, ctx.tossW) ? Math.atan2(Math.abs(p[ctx.tossW].x - p[sIdx].x), p[ctx.tossW].y - p[sIdx].y) * 180 / Math.PI : NaN;
-  return { knee, elbow, toss };
+  // impact: racket hand at its highest between the trophy and shortly after the toss arm comes down
+  let imp = cl(s.end + 0.05 * f), best = Infinity; const rw = ctx.racket[2];
+  for (let i = s.tro; i <= cl(s.end + 0.4 * f); i++) { const p = t.frames[i]; if (p && vis(p, rw) && p[rw].y < best) { best = p[rw].y; imp = i; } }
+  if (imp <= s.tro) imp = cl(s.end + 0.05 * f);
+  return [cl(s.toss - 0.5 * f), cl(s.toss), s.tro, cl((s.tro + imp) / 2), imp, cl(imp + 0.45 * f)];
 }
 
 // Re-measure when the user moves the trophy frame by hand.
